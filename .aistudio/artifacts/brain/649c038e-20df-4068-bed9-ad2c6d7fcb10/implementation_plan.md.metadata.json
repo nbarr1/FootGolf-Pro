@@ -1,0 +1,6 @@
+{
+  "summary":  "Comprehensive architectural refactoring plan for Golf Clash / Ultimate Golf style arcade footgolf mechanics. Covers:\n- State Machine (Aiming -> Pullback -> Timing Window -> BallFlight)\n- Inverse Drag-and-Release Pullback with 0-100% standard power & 100-125% Overpower scaling\n- Ground Concentric Bullseye Reticle with rapid oscillating timing needle\n- Arcade Timing Engine (Perfect, Great, Good, Hook/Slice with deterministic lateral physics deviation)\n- Dedicated Putting Pullback Subsystem with cup capture velocity tolerance\n- Pure Headless Physics Engine decoupled from Three.js rendering for server-side validation\n- Detailed verification & test suite plan",
+  "updatedAt":  "2026-11-01T03:42:34.356695870Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}
