@@ -1,0 +1,11 @@
+// CI only: resolve Maven Central artifacts through Google's mirror of Maven Central.
+// GitHub runners intermittently get rejected by repo.maven.apache.org, which Gradle
+// reports as "Could not find" for every Central dependency.
+def mirror = 'https://maven-central.storage-download.googleapis.com/maven2/'
+def rewrite = { RepositoryHandler repos ->
+  repos.withType(MavenArtifactRepository).configureEach { repo ->
+    if (repo.url.toString().startsWith('https://repo.maven.apache.org/maven2')) repo.url = mirror
+  }
+}
+settingsEvaluated { settings -> rewrite(settings.pluginManagement.repositories) }
+allprojects { rewrite(repositories); rewrite(buildscript.repositories) }

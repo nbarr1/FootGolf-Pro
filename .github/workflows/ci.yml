@@ -26,10 +26,11 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
+          cache: gradle
       - run: bun install --frozen-lockfile
       - run: bun run build
       - run: bunx cap sync android
-      - run: ./gradlew assembleDebug --no-daemon
+      - run: ./gradlew assembleDebug --no-daemon --init-script ../.github/gradle/central-mirror.gradle
         working-directory: android
       - uses: actions/upload-artifact@v4
         with:
