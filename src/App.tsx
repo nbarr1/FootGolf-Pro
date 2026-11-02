@@ -601,10 +601,10 @@ export default function App() {
               if (result.events.surface === 'sand') {
                 currentHoleHitBunkerRef.current = true;
               }
-              rendererRef.current.emitParticles(
+              rendererRef.current.emitSurfaceImpact(
                 result.state.position,
-                6,
-                result.events.surface === 'sand' ? 0xe0c98b : 0x4caf50
+                result.events.surface,
+                result.events.impactSpeed
               );
             }
 
@@ -1001,10 +1001,10 @@ export default function App() {
         kickStartLieRef.current = ballStateRef.current.lie;
 
         // Divot grass / sand particles at kick spot
-        rendererRef.current?.emitParticles(
+        rendererRef.current?.emitSurfaceImpact(
           ballStateRef.current.position,
-          14,
-          ballStateRef.current.lie === 'sand' ? 0xe0c98b : 0x4caf50
+          ballStateRef.current.lie,
+          kickType === 'putt' ? 2 : 12
         );
 
         ballStateRef.current = {
@@ -1107,10 +1107,10 @@ export default function App() {
         kickStartPosRef.current = { ...ballStateRef.current.position };
         kickStartLieRef.current = ballStateRef.current.lie;
 
-        rendererRef.current?.emitParticles(
+        rendererRef.current?.emitSurfaceImpact(
           ballStateRef.current.position,
-          14,
-          ballStateRef.current.lie === 'sand' ? 0xe0c98b : 0x4caf50
+          ballStateRef.current.lie,
+          kickType === 'putt' ? 2 : 12
         );
 
         ballStateRef.current = {
@@ -1234,10 +1234,10 @@ export default function App() {
       kickStartLieRef.current = ballStateRef.current.lie;
 
       // Divot grass / sand particles at kick spot
-      rendererRef.current?.emitParticles(
+      rendererRef.current?.emitSurfaceImpact(
         ballStateRef.current.position,
-        12,
-        ballStateRef.current.lie === 'sand' ? 0xe0c98b : 0x4caf50
+        ballStateRef.current.lie,
+        kickType === 'putt' ? 2 : 12
       );
 
       const kick = calculateKickVelocity(
