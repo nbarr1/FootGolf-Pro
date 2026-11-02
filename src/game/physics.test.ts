@@ -15,9 +15,11 @@ import {
   predictTrajectory,
   CUP_RADIUS,
   BALL_RADIUS,
+  getTerrainHeight,
 } from './physics';
 
-import { HoleData, BallPhysicsState } from '../types';
+import { HoleData, BallPhysicsState, KickType, SurfaceType } from '../types';
+import { simulateHeadlessShot } from './deterministicPhysics';
 
 const mockHole: HoleData = {
   id: 1,
@@ -173,10 +175,11 @@ test('generatePuttingReadLine computes slope break angles and beaded path', () =
   assert.ok(puttingRead.points.length > 5, 'Putting read line should generate multiple track points');
   assert.ok(['left', 'right', 'straight'].includes(puttingRead.breakDirection), 'Break direction should be classified');
   assert.ok(puttingRead.suggestedPower > 0, 'Suggested power should be computed');
-  // 10m putt on flat ground requires v0 = sqrt(2 * g * mu * 10.35) = sqrt(2 * 9.81 * 0.052 * 10.35) = ~3.25 m/s. Power = 3.25 / 13 = ~0.25 (25%)
+  // 10m putt on flat ground requires v0 = sqrt(2 * g * mu * 10.35) = sqrt(2 * 9.81 * 0.052 * 10.35) = ~3.25 m/s.
+  // Power = 3.25 / PUTT_MAX_SPEED_MPS (5.5) = ~0.59 (59%)
   assert.ok(
-    puttingRead.suggestedPower >= 0.20 && puttingRead.suggestedPower <= 0.32,
-    `Suggested power for 10m putt should be ~25%, got ${(puttingRead.suggestedPower * 100).toFixed(1)}%`
+    puttingRead.suggestedPower >= 0.5 && puttingRead.suggestedPower <= 0.68,
+    `Suggested power for 10m putt should be ~59%, got ${(puttingRead.suggestedPower * 100).toFixed(1)}%`
   );
   assert.ok(typeof puttingRead.reachesCup === 'boolean', 'reachesCup boolean should be defined');
   assert.ok(typeof puttingRead.elevationDeltaMeters === 'number', 'elevationDeltaMeters should be numeric');
@@ -210,7 +213,7 @@ test('getEstimatedKickDistance calculates strategic distance projections and lie
   assert.equal(fullDrive.liePenaltyPercent, 0, 'No lie penalty on tee');
 
   const halfDrive = getEstimatedKickDistance('drive', 0.5, 'tee');
-  assert.ok(halfDrive.totalMeters < fullDrive.totalMeters * 0.4, 'Half power drive should non-linearly scale distance');
+  assert.ok(halfDrive.totalMeters < fullDrive.totalMeters * 0.5, 'Half power drive should non-linearly scale distance');
 
   const roughDrive = getEstimatedKickDistance('drive', 1.0, 'rough');
   assert.ok(roughDrive.totalMeters < fullDrive.totalMeters, 'Rough should reduce drive distance');
@@ -225,3 +228,47 @@ test('getEstimatedKickDistance calculates strategic distance projections and lie
 });
 
 
+
+test('HUD distance estimates match simulated kicks on flat ground', () => {
+  const flat = {
+    ...mockHole,
+    hills: [],
+    trees: [],
+    bunkers: [],
+    waterHazards: [],
+    fairways: [{ x: 0, z: 200, rx: 400, rz: 400 }],
+    greens: [{ x: 0, z: 0, radius: 60 }],
+    pinPosition: { x: 0, y: 0, z: 3000 },
+  } as HoleData;
+  const cases: { kick: KickType; lie: SurfaceType; powers: number[] }[] = [
+    { kick: 'drive', lie: 'tee', powers: [0.5, 0.75, 1.0] },
+    { kick: 'chip', lie: 'fairway', powers: [0.5, 0.75, 1.0] },
+    { kick: 'putt', lie: 'green', powers: [0.4, 0.7, 1.0] },
+  ];
+  for (const c of cases) {
+    for (const power of c.powers) {
+      // Greens override fairways near the origin, so putt from the green and kick from the fairway
+      const start = c.lie === 'green' ? { x: 0, z: 0 } : { x: 0, z: 100 };
+      const sim = simulateHeadlessShot(
+        {
+          startPos: { x: start.x, y: getTerrainHeight(flat, start.x, start.z) + BALL_RADIUS, z: start.z },
+          kickType: c.kick,
+          powerNormalized: power,
+          timingDeviation: 0,
+          aimAngleRad: 0,
+          spin: { top: 0, side: 0 },
+          currentLie: c.lie,
+          wind: { speed: 0, angleRad: 0 },
+        },
+        flat,
+        3000
+      );
+      const est = getEstimatedKickDistance(c.kick, power, c.lie).totalMeters;
+      const err = Math.abs(est - sim.totalDistanceMeters) / sim.totalDistanceMeters;
+      assert.ok(
+        err < 0.2,
+        `${c.kick} from ${c.lie} at ${power}: estimate ${est}m vs simulated ${sim.totalDistanceMeters.toFixed(1)}m`
+      );
+    }
+  }
+});

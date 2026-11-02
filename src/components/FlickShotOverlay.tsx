@@ -296,7 +296,7 @@ export const FlickShotOverlay: React.FC<FlickShotOverlayProps> = ({
       {/* Floating Flick Telemetry HUD */}
       {flickTelemetry && currentPoint && (
         <div
-          className="absolute z-40 pointer-events-none transform -translate-x-1/2 -translate-y-full mb-5 bg-slate-950/95 border border-emerald-500/70 px-4 py-2 rounded-2xl shadow-2xl backdrop-blur-none text-center"
+          className="absolute z-40 pointer-events-none transform -translate-x-1/2 -translate-y-full mb-5 bg-slate-950/95 border border-emerald-500/70 px-4 py-2 rounded-2xl shadow-2xl text-center"
           style={{
             left: `${currentPoint.x}px`,
             top: `${currentPoint.y - 15}px`,

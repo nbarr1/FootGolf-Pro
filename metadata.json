@@ -1,6 +1,6 @@
 {
   "name": "FootGolf Pro: World Tour 3D",
-  "description": "Realistic 3D Foot Golf mobile game with soccer ball physics, multiple scenic courses, and online multiplayer tournaments.",
+  "description": "Realistic 3D Foot Golf mobile game with soccer ball physics, multiple scenic courses, and tournaments against simulated rivals.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

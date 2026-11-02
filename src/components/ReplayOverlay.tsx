@@ -72,7 +72,7 @@ export const ReplayOverlay: React.FC<ReplayOverlayProps> = ({
     <div className="fixed inset-0 pointer-events-none z-40 flex flex-col justify-between p-3 sm:p-5 select-none font-sans">
       {/* Top TV Broadcast Header */}
       <div className="flex items-center justify-between w-full pointer-events-auto">
-        <div className="flex items-center gap-2.5 bg-slate-950/90 border border-red-500/50 rounded-2xl px-3.5 py-2 shadow-2xl backdrop-blur-md">
+        <div className="flex items-center gap-2.5 bg-slate-950/90 border border-red-500/50 rounded-2xl px-3.5 py-2 shadow-2xl">
           {/* Pulsing Red Replay Dot */}
           <div className="flex items-center gap-2 pr-3 border-r border-slate-800">
             <span className="relative flex h-3 w-3">
@@ -116,7 +116,7 @@ export const ReplayOverlay: React.FC<ReplayOverlayProps> = ({
       </div>
 
       {/* Bottom Center Control Bar */}
-      <div className="self-center w-full max-w-xl bg-slate-950/95 border border-slate-800 rounded-2xl p-3 sm:p-4 shadow-2xl backdrop-blur-md pointer-events-auto flex flex-col gap-2.5">
+      <div className="self-center w-full max-w-xl bg-slate-950/95 border border-slate-800 rounded-2xl p-3 sm:p-4 shadow-2xl pointer-events-auto flex flex-col gap-2.5">
         {/* Timeline Scrub Bar */}
         <div className="flex items-center gap-3">
           <span className="text-[11px] font-mono font-bold text-slate-400 tabular-nums w-12 text-right">

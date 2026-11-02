@@ -19,7 +19,7 @@ export const TournamentLeaderboardModal: React.FC<TournamentLeaderboardModalProp
   const leader = tournament.leaderboard[0];
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-sm pointer-events-auto">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/80 pointer-events-auto">
       <div className="bg-slate-900 border border-emerald-500/40 rounded-2xl p-5 sm:p-6 w-full max-w-xl text-left shadow-2xl max-h-[90vh] flex flex-col">
         {/* Header */}
         <div className="flex justify-between items-center mb-3 pb-3 border-b border-slate-800">

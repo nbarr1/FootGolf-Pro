@@ -13,6 +13,17 @@ import {
 } from './physics';
 import { generateGreenGrid, GreenGridSpec } from './greenGrid';
 import { PlayerCharacter } from './playerCharacter';
+import { getActiveSettings } from './settings';
+import { batchStaticMeshes, BatchResult, disposeChildren } from './staticBatcher';
+import {
+  computePixelRatio,
+  FrameTimeMonitor,
+  QUALITY_PRESETS,
+  QualityPreference,
+  QualitySettings,
+  QualityTier,
+  resolveInitialTier,
+} from './quality';
 import { CourseData, HoleData, KickType, MotionTrailConfig, MotionTrailStyleId, SpinControl, Vector3D } from '../types';
 import { DEFAULT_MOTION_TRAIL_CONFIGS, getMotionTrailPreset, calculateDynamicTrailColor } from './motionTrails';
 
@@ -158,7 +169,7 @@ export class FootGolfRenderer {
   private cameraImpactTrauma: number = 0;
   private currentDrsScale: number = 1.0;
 
-  constructor(container: HTMLElement, course: CourseData, hole: HoleData) {
+  constructor(container: HTMLElement, course: CourseData, hole: HoleData, qualityPref: QualityPreference = 'auto') {
 
     this.container = container;
 
@@ -186,10 +197,12 @@ export class FootGolfRenderer {
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.15;
-    this.renderer.setPixelRatio(this.isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, 2));
+    this.qualitySettings = QUALITY_PRESETS[resolveInitialTier(qualityPref, this.isSoftwareGl)];
+    this.frameMonitor = new FrameTimeMonitor(this.qualitySettings, qualityPref === 'auto' && !this.isSoftwareGl);
+    this.renderer.setPixelRatio(computePixelRatio(this.qualitySettings, window.devicePixelRatio, 1));
     this.renderer.setSize(container.clientWidth || 800, container.clientHeight || 600);
-    this.renderer.shadowMap.enabled = !this.isSoftwareGl;
-    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.renderer.shadowMap.enabled = this.qualitySettings.shadows;
+    this.renderer.shadowMap.type = this.qualitySettings.softShadows ? THREE.PCFSoftShadowMap : THREE.PCFShadowMap;
 
     container.appendChild(this.renderer.domElement);
 
@@ -221,9 +234,9 @@ export class FootGolfRenderer {
     this.dirLight = new THREE.DirectionalLight('#fff5e0', 1.6);
     this.dirLight.position.set(40, 80, 40);
     if (!this.isSoftwareGl) {
-      this.dirLight.castShadow = true;
-      this.dirLight.shadow.mapSize.width = 1024;
-      this.dirLight.shadow.mapSize.height = 1024;
+      this.dirLight.castShadow = this.qualitySettings.shadows;
+      this.dirLight.shadow.mapSize.width = this.qualitySettings.shadowMapSize;
+      this.dirLight.shadow.mapSize.height = this.qualitySettings.shadowMapSize;
       this.dirLight.shadow.camera.near = 0.5;
       this.dirLight.shadow.camera.far = 300;
       const d = 60;
@@ -1181,14 +1194,8 @@ export class FootGolfRenderer {
    * Builds 3-12 part procedural trees, boulders, tee markers, and yardage posts
    */
   private buildProps(hole: HoleData) {
-    // Clear old props
-    while (this.propGroup.children.length > 0) {
-      const child = this.propGroup.children[0];
-      this.propGroup.remove(child);
-      if ((child as THREE.Mesh).geometry) {
-        (child as THREE.Mesh).geometry.dispose();
-      }
-    }
+    // Clear old props (including nested geometries and materials)
+    disposeChildren(this.propGroup);
 
     // 1. Multi-part Trees (Pine or Palm)
     for (const tree of hole.trees) {
@@ -1575,6 +1582,24 @@ export class FootGolfRenderer {
         this.propGroup.add(bench);
       }
     }
+
+    // Merge static, untextured prop meshes into one draw call per material
+    this.lastPropBatch = batchStaticMeshes(this.propGroup);
+  }
+
+  private lastPropBatch: BatchResult = { meshesBefore: 0, meshesAfter: 0 };
+
+  /** Draw-call diagnostics for the performance overlay and tests. */
+  public getRenderStats() {
+    const info = this.renderer.info;
+    return {
+      drawCalls: info.render.calls,
+      triangles: info.render.triangles,
+      geometries: info.memory.geometries,
+      textures: info.memory.textures,
+      propMeshesBefore: this.lastPropBatch.meshesBefore,
+      propMeshesAfter: this.lastPropBatch.meshesAfter,
+    };
   }
 
   /**
@@ -2337,15 +2362,81 @@ export class FootGolfRenderer {
    * Triggers physical tactile camera impact trauma
    */
   public triggerCameraImpact(intensity: number = 0.28) {
+    if (getActiveSettings().reducedMotion) return;
     this.cameraImpactTrauma = Math.min(1.0, this.cameraImpactTrauma + intensity);
   }
 
   /**
-   * Real-time Dynamic Resolution Scaling (DRS) controller
+   * Dynamic resolution scaling: lowers the render pixel ratio when frames miss budget.
    */
   public setDynamicResolutionScale(scale: number) {
-    // Keep scale tracker without thrashing WebGL buffer allocation during flight
-    this.currentDrsScale = Math.max(0.68, Math.min(1.0, scale));
+    const clamped = Math.max(FrameTimeMonitor.MIN_SCALE, Math.min(1.0, scale));
+    if (Math.abs(clamped - this.currentDrsScale) < 0.01) return;
+    this.currentDrsScale = clamped;
+    this.renderer.setPixelRatio(computePixelRatio(this.qualitySettings, window.devicePixelRatio, clamped));
+    this.onResize();
+  }
+
+  private qualitySettings: QualitySettings;
+  private frameMonitor: FrameTimeMonitor;
+  private qualityListener: ((tier: QualityTier) => void) | null = null;
+
+  public getQualityTier(): QualityTier {
+    return this.qualitySettings.tier;
+  }
+
+  public onQualityChange(listener: ((tier: QualityTier) => void) | null) {
+    this.qualityListener = listener;
+  }
+
+  /** Applies a quality preset at runtime: pixel ratio, shadows, and post-processing. */
+  public setQualityPreference(pref: QualityPreference) {
+    const tier = resolveInitialTier(pref, this.isSoftwareGl);
+    this.frameMonitor = new FrameTimeMonitor(QUALITY_PRESETS[tier], pref === 'auto' && !this.isSoftwareGl);
+    this.applyQuality(QUALITY_PRESETS[tier]);
+  }
+
+  private applyQuality(settings: QualitySettings) {
+    const shadowsChanged = settings.shadows !== this.qualitySettings.shadows ||
+      settings.softShadows !== this.qualitySettings.softShadows;
+    const mapChanged = settings.shadowMapSize !== this.qualitySettings.shadowMapSize;
+    this.qualitySettings = settings;
+    this.frameMonitor.setSettings(settings);
+    this.currentDrsScale = 1;
+    this.renderer.setPixelRatio(computePixelRatio(settings, window.devicePixelRatio, 1));
+    this.onResize();
+
+    const shadows = settings.shadows && !this.isSoftwareGl;
+    this.renderer.shadowMap.enabled = shadows;
+    this.renderer.shadowMap.type = settings.softShadows ? THREE.PCFSoftShadowMap : THREE.PCFShadowMap;
+    this.dirLight.castShadow = shadows;
+    if (mapChanged) {
+      this.dirLight.shadow.mapSize.set(settings.shadowMapSize, settings.shadowMapSize);
+      this.dirLight.shadow.map?.dispose();
+      this.dirLight.shadow.map = null;
+    }
+    if (shadowsChanged) {
+      // Shadow toggles change shader variants, so materials must recompile
+      this.scene.traverse((obj) => {
+        const mat = (obj as THREE.Mesh).material;
+        if (mat) (Array.isArray(mat) ? mat : [mat]).forEach((m) => (m.needsUpdate = true));
+      });
+    }
+    this.onQualityApplied(settings);
+    this.qualityListener?.(settings.tier);
+  }
+
+  /** Hook for tier-dependent features (post-processing); extended in later phases. */
+  protected onQualityApplied(_settings: QualitySettings) {}
+
+  private updateQualityMonitor(rawDt: number) {
+    const decision = this.frameMonitor.sample(rawDt * 1000);
+    if (!decision) return;
+    if (decision.downgradeTo) {
+      this.applyQuality(QUALITY_PRESETS[decision.downgradeTo]);
+    } else if (decision.scale !== undefined) {
+      this.setDynamicResolutionScale(decision.scale);
+    }
   }
 
   /**
@@ -2580,15 +2671,45 @@ export class FootGolfRenderer {
     this.updateCameraInstant(hole);
   }
 
+  private frameHook: ((rawDt: number) => void) | null = null;
+  private isPaused = false;
+
+  /**
+   * Registers a callback that runs at the start of every frame, before the scene updates.
+   * The game uses it to step physics so there is a single animation loop.
+   */
+  public setFrameHook(hook: ((rawDt: number) => void) | null) {
+    this.frameHook = hook;
+  }
+
+  /** Pauses or resumes the frame loop (used when the app goes to the background). */
+  public setPaused(paused: boolean) {
+    if (this.isPaused === paused || this.isDestroyed) return;
+    this.isPaused = paused;
+    if (paused) {
+      cancelAnimationFrame(this.frameId);
+    } else {
+      this.startLoop();
+    }
+  }
+
+  /** Moves only the visible ball (no trail or spin updates); used for render interpolation. */
+  public setBallRenderPosition(pos: Vector3D) {
+    this.ballGroup.position.set(pos.x, pos.y, pos.z);
+  }
+
   private startLoop() {
     let lastTime = performance.now();
 
     const tick = (currentTime: number) => {
-      if (this.isDestroyed) return;
+      if (this.isDestroyed || this.isPaused) return;
 
-      const rawDt = (currentTime - lastTime) / 1000;
+      const rawDt = Math.max(0, (currentTime - lastTime) / 1000);
       const dt = Math.min(rawDt, 0.05); // clamped dt
       lastTime = currentTime;
+
+      this.frameHook?.(rawDt);
+      this.updateQualityMonitor(rawDt);
 
       // Dynamic animations
       this.updateFlag(currentTime * 0.001);

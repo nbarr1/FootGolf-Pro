@@ -22,7 +22,30 @@ export const AIR_DENSITY = 1.225;
 export const BALL_MASS = 0.43; // 430g
 export const BALL_AREA = Math.PI * BALL_RADIUS * BALL_RADIUS;
 export const DRAG_COEFFICIENT = 0.26;
+/** Drag coefficient after the drag crisis (turbulent boundary layer at high speed). */
+export const DRAG_COEFFICIENT_SUPERCRITICAL = 0.12;
+const DRAG_CRISIS_LOW_MPS = 12;
+const DRAG_CRISIS_HIGH_MPS = 20;
+
+/**
+ * Speed-dependent drag coefficient. Soccer balls show a "drag crisis": above roughly
+ * 15 m/s the boundary layer turns turbulent and drag drops sharply. This is blended
+ * smoothly between the subcritical and supercritical values.
+ */
+export function getDragCoefficient(airSpeed: number): number {
+  if (airSpeed <= DRAG_CRISIS_LOW_MPS) return DRAG_COEFFICIENT;
+  if (airSpeed >= DRAG_CRISIS_HIGH_MPS) return DRAG_COEFFICIENT_SUPERCRITICAL;
+  const t = (airSpeed - DRAG_CRISIS_LOW_MPS) / (DRAG_CRISIS_HIGH_MPS - DRAG_CRISIS_LOW_MPS);
+  const smooth = t * t * (3 - 2 * t);
+  return DRAG_COEFFICIENT + (DRAG_COEFFICIENT_SUPERCRITICAL - DRAG_COEFFICIENT) * smooth;
+}
 export const MAGNUS_FACTOR = 0.0035; // Lift force coefficient from spin
+
+// Full-power launch speeds per kick type (m/s). Tuned so simulated distances match the
+// distances shown in the HUD (see the calibration test in physics.test.ts).
+export const DRIVE_MAX_SPEED_MPS = 40.0;
+export const CHIP_MAX_SPEED_MPS = 20.0;
+export const PUTT_MAX_SPEED_MPS = 5.5;
 
 // Surface physical properties
 export interface SurfaceProperty {
@@ -171,16 +194,16 @@ export function calculateKickVelocity(
 
   if (kickType === 'drive') {
     // Low, powerful piercing shot
-    launchAngleDeg = 14 + (1 - spin.top) * 3; // backspin increases loft
-    maxSpeedMps = 32.0 * powerBonus;
+    launchAngleDeg = 15 + (1 - spin.top) * 3; // backspin increases loft
+    maxSpeedMps = DRIVE_MAX_SPEED_MPS * powerBonus;
   } else if (kickType === 'chip') {
     // High arching lob over obstacles
     launchAngleDeg = 36 + (1 - spin.top) * 5;
-    maxSpeedMps = 20.0 * powerBonus;
+    maxSpeedMps = CHIP_MAX_SPEED_MPS * powerBonus;
   } else if (kickType === 'putt') {
     // Pure ground roll
     launchAngleDeg = 0.5;
-    maxSpeedMps = 13.0;
+    maxSpeedMps = PUTT_MAX_SPEED_MPS;
   }
 
   const speed = effectivePower * maxSpeedMps;
@@ -232,24 +255,31 @@ export function getEstimatedKickDistance(
   const modifier = lieProp.kickPowerModifier;
   const liePenaltyPercent = Math.round((1 - modifier) * 100);
 
+  // Calibrated against simulateHeadlessShot on flat ground with no wind
+  // (see the "HUD distance estimates match simulated kicks" test).
   let fullCarry = 0;
   let fullTotal = 0;
+  let exponent = 1.25;
 
   if (kickType === 'drive') {
-    fullCarry = 56;
-    fullTotal = 135;
+    fullCarry = 64;
+    fullTotal = 121;
+    exponent = 1.25;
   } else if (kickType === 'chip') {
-    fullCarry = 34;
-    fullTotal = 46;
+    fullCarry = 29;
+    fullTotal = 47;
+    exponent = 1.45;
   } else {
-    // putt (pure ground roll)
-    const rollBase = currentLie === 'green' ? 28 : currentLie === 'fairway' || currentLie === 'tee' ? 20 : 10;
+    // Putt (pure ground roll): distance = v^2 / (2 * mu * g)
+    const mu = lieProp.rollingFriction;
     fullCarry = 0;
-    fullTotal = rollBase;
+    fullTotal = (PUTT_MAX_SPEED_MPS * PUTT_MAX_SPEED_MPS) / (2 * mu * Math.abs(GRAVITY));
+    exponent = 2;
   }
 
-  const effectivePwr = Math.max(0.05, power * modifier);
-  const powerFactor = Math.pow(effectivePwr, 1.85);
+  // The lie modifier scales launch speed, and putts already account for surface friction
+  const effectivePwr = Math.max(0.05, power * (kickType === 'putt' ? 1 : modifier));
+  const powerFactor = Math.pow(effectivePwr, exponent);
 
   const carry = Math.round(fullCarry * powerFactor);
   const total = Math.max(1, Math.round(fullTotal * powerFactor));
@@ -319,7 +349,7 @@ export function stepBallPhysics(
 
   // 1. Aerodynamic drag in flight
   if (!state.isGrounded && airSpeed > 0.01) {
-    const dragForce = 0.5 * AIR_DENSITY * airSpeed * airSpeed * BALL_AREA * DRAG_COEFFICIENT;
+    const dragForce = 0.5 * AIR_DENSITY * airSpeed * airSpeed * BALL_AREA * getDragCoefficient(airSpeed);
     const dragAcc = dragForce / BALL_MASS;
     nextVel.x -= (relVx / airSpeed) * dragAcc * dt;
     nextVel.y -= (relVy / airSpeed) * dragAcc * dt;
@@ -857,12 +887,12 @@ export function generatePuttingReadLine(
   // 1. Calculate physics-grounded suggested power to reach cup (+0.35m past the pin)
   // Work-energy theorem: 1/2 m v0^2 = m g (mu * s + h)
   // v0^2 = 2 * 9.81 * (0.052 * (distToPin + 0.35) + elevationDelta)
-  // For putt: v0 = power * 13.0 m/s => 169 * power^2 = 1.02024 * (distToPin + 0.35) + 19.62 * elevationDelta
+  // For putt: v0 = power * PUTT_MAX_SPEED_MPS => PUTT_MAX_SPEED_MPS^2 * power^2 = 1.02024 * (distToPin + 0.35) + 19.62 * elevationDelta
   const targetDist = distToPin + 0.35;
   const workReq = 1.02024 * targetDist + 19.62 * elevationDelta;
   const suggestedPower = Math.max(
     0.08,
-    Math.min(1.0, Math.sqrt(Math.max(0.01, workReq) / 169))
+    Math.min(1.0, Math.sqrt(Math.max(0.01, workReq) / (PUTT_MAX_SPEED_MPS * PUTT_MAX_SPEED_MPS)))
   );
 
   // 2. Simulate projected ball roll based on user's selected power

@@ -129,7 +129,7 @@ export const GameHUD: React.FC<GameHUDProps> = ({
       <div className="pt-3 px-4 flex justify-between items-start pointer-events-auto z-50">
         {/* Left: Distance to Pin & Surface Lie badge at a glance */}
         <div className="flex items-center gap-2">
-          <div className="px-3.5 py-2 rounded-2xl bg-slate-950/85 text-slate-200 border border-slate-700/80 backdrop-blur-md shadow-2xl flex items-center gap-2.5">
+          <div className="px-3.5 py-2 rounded-2xl bg-slate-950/85 text-slate-200 border border-slate-700/80 shadow-2xl flex items-center gap-2.5">
             <div className="flex items-center gap-1.5 font-black text-xs">
               <Flag className="w-4 h-4 text-emerald-400 fill-emerald-400/20" />
               <span className="font-mono text-sm font-black text-yellow-300">{distToPinMeters}m</span>
@@ -157,7 +157,7 @@ export const GameHUD: React.FC<GameHUDProps> = ({
           </div>
 
           {/* Top Bar Shot Type & Max Distance (Quick glance indicator) */}
-          <div className="hidden sm:flex items-center gap-1.5 px-3 py-2 rounded-2xl bg-slate-950/85 text-slate-200 border border-slate-700/80 backdrop-blur-md shadow-2xl">
+          <div className="hidden sm:flex items-center gap-1.5 px-3 py-2 rounded-2xl bg-slate-950/85 text-slate-200 border border-slate-700/80 shadow-2xl">
             <span className="text-[10px] font-bold text-slate-400 uppercase">Club:</span>
             <span className="text-yellow-400 text-xs font-black uppercase tracking-wider">{kickType}</span>
             <span className="text-slate-600">·</span>
@@ -170,7 +170,7 @@ export const GameHUD: React.FC<GameHUDProps> = ({
         {/* Right: Drop-down Menu trigger button */}
         <button
           onClick={() => setIsMenuOpen((prev) => !prev)}
-          className={`px-3.5 py-2 rounded-2xl flex items-center gap-2 text-xs font-black shadow-2xl backdrop-blur-md transition-all active:scale-95 border cursor-pointer ${
+          className={`px-3.5 py-2 rounded-2xl flex items-center gap-2 text-xs font-black shadow-2xl transition-all active:scale-95 border cursor-pointer ${
             isMenuOpen
               ? 'bg-amber-500 text-slate-950 border-amber-300'
               : 'bg-slate-950/85 text-slate-200 border-slate-700/80 hover:border-yellow-400/80'
@@ -197,7 +197,7 @@ export const GameHUD: React.FC<GameHUDProps> = ({
 
       {/* Drop-Down Menu Drawer (Visible only when user taps the menu button) */}
       {isMenuOpen && (
-        <div className="absolute top-14 right-4 w-80 sm:w-88 max-h-[82vh] overflow-y-auto bg-slate-950/95 backdrop-blur-xl border border-slate-700/80 rounded-3xl p-4 shadow-2xl pointer-events-auto z-50 animate-in fade-in slide-in-from-top-3 flex flex-col gap-4 text-slate-200">
+        <div className="absolute top-14 right-4 w-80 sm:w-88 max-h-[82vh] overflow-y-auto bg-slate-950/95 border border-slate-700/80 rounded-3xl p-4 shadow-2xl pointer-events-auto z-50 animate-in fade-in slide-in-from-top-3 flex flex-col gap-4 text-slate-200">
           {/* Section 1: Hole Telemetry & Scorecard */}
           <div className="bg-slate-900/90 rounded-2xl p-3 border border-slate-800">
             <div className="flex justify-between items-center mb-2">
@@ -398,7 +398,7 @@ export const GameHUD: React.FC<GameHUDProps> = ({
       {/* In-Flight Telemetry Banner: Shows ONLY when ball is flying/rolling */}
       {isBallInMotion && inFlightTelemetry && (
         <div className="self-center flex flex-wrap items-center justify-center gap-2 mb-8 pointer-events-auto z-30">
-          <div className="bg-slate-950/95 border border-cyan-500/60 px-4 py-2 rounded-2xl shadow-2xl flex items-center gap-3 text-xs font-black backdrop-blur-md">
+          <div className="bg-slate-950/95 border border-cyan-500/60 px-4 py-2 rounded-2xl shadow-2xl flex items-center gap-3 text-xs font-black">
             <span className="text-cyan-400 uppercase tracking-widest text-[10px]">FLIGHT</span>
             <span className="text-slate-400 text-[10px]">ALT:</span>
             <span className="text-cyan-300 font-mono text-sm">{inFlightTelemetry.altitudeMeters.toFixed(1)}m</span>
@@ -413,7 +413,7 @@ export const GameHUD: React.FC<GameHUDProps> = ({
           {onToggleFastForward && (
             <button
               onClick={onToggleFastForward}
-              className={`px-3 py-2 rounded-2xl text-xs font-black uppercase flex items-center gap-1 shadow-2xl transition-all active:scale-95 border backdrop-blur-md ${
+              className={`px-3 py-2 rounded-2xl text-xs font-black uppercase flex items-center gap-1 shadow-2xl transition-all active:scale-95 border ${
                 isFastForward
                   ? 'bg-amber-500 text-slate-950 border-amber-300 shadow-amber-500/40 animate-pulse'
                   : 'bg-slate-950/95 text-amber-300 border-amber-500/60 hover:bg-slate-900'
