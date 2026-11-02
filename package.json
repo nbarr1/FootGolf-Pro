@@ -9,9 +9,18 @@
     "preview": "vite preview",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
-    "test": "tsx --test src/game/*.test.ts src/game/*/*.test.ts"
+    "test": "tsx --test src/game/*.test.ts src/game/*/*.test.ts",
+    "android:sync": "vite build && cap sync android",
+    "android:debug": "vite build && cap sync android && cd android && ./gradlew assembleDebug",
+    "android:open": "cap open android"
   },
   "dependencies": {
+    "@capacitor/android": "8.6.0",
+    "@capacitor/app": "^8",
+    "@capacitor/core": "8.6.0",
+    "@capacitor/haptics": "^8",
+    "@capacitor/preferences": "^8",
+    "@capacitor/status-bar": "^8",
     "canvas-confetti": "^1.9.4",
     "lucide-react": "^0.546.0",
     "motion": "^12.23.24",
@@ -20,6 +29,7 @@
     "three": "^0.186.1"
   },
   "devDependencies": {
+    "@capacitor/cli": "8.6.0",
     "@tailwindcss/vite": "^4.3.3",
     "@types/canvas-confetti": "^1.9.0",
     "@types/node": "^22.14.0",

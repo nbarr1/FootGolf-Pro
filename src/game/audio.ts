@@ -31,6 +31,21 @@ class SoundEngine {
     }
   }
 
+  /** Suspends audio while the app is in the background. */
+  public suspendForBackground() {
+    if (this.ctx && this.ctx.state === 'running') {
+      this.ctx.suspend().catch(() => {});
+    }
+  }
+
+  /** Resumes audio when returning to the foreground (unless muted). */
+  public resumeFromBackground() {
+    if (this.isMuted) return;
+    if (this.ctx && this.ctx.state === 'suspended') {
+      this.ctx.resume().catch(() => {});
+    }
+  }
+
   public getMuted(): boolean {
     return this.isMuted;
   }

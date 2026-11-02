@@ -245,7 +245,7 @@ export const ArcadeShotOverlay: React.FC<ArcadeShotOverlayProps> = ({
   const needlePercent = ((needleValue + 1.0) / 2.0) * 100; // 0% to 100% across bar
 
   return (
-    <div className="absolute inset-0 pointer-events-none select-none z-30 flex flex-col justify-end">
+    <div className="safe-inset pointer-events-none select-none z-30 flex flex-col justify-end">
       {/* Upper Area: Drag to Aim Pan on 3D field (below top header bar) */}
       {!disabled && !isPulling && (
         <div

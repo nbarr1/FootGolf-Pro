@@ -69,7 +69,7 @@ export const ReplayOverlay: React.FC<ReplayOverlayProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 pointer-events-none z-40 flex flex-col justify-between p-3 sm:p-5 select-none font-sans">
+    <div className="safe-inset pointer-events-none z-40 flex flex-col justify-between p-3 sm:p-5 select-none font-sans">
       {/* Top TV Broadcast Header */}
       <div className="flex items-center justify-between w-full pointer-events-auto">
         <div className="flex items-center gap-2.5 bg-slate-950/90 border border-red-500/50 rounded-2xl px-3.5 py-2 shadow-2xl">

@@ -124,7 +124,7 @@ export const GameHUD: React.FC<GameHUDProps> = ({
   };
 
   return (
-    <div className="absolute inset-0 pointer-events-none select-none z-40 flex flex-col justify-between">
+    <div className="safe-inset pointer-events-none select-none z-40 flex flex-col justify-between">
       {/* Top Header Bar: Clean & Minimal - Pin Distance, Lie, & Drop-down Menu */}
       <div className="pt-3 px-4 flex justify-between items-start pointer-events-auto z-50">
         {/* Left: Distance to Pin & Surface Lie badge at a glance */}

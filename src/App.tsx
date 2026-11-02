@@ -28,7 +28,9 @@ import {
 import { triggerHaptic } from './game/haptics';
 import { scoreHoleOut, strokesTakenFromCounter } from './game/core/holeScoring';
 import { chooseKickType } from './game/core/botPlayer';
-import { GameSettings, parseSettings, setActiveSettings, SETTINGS_STORAGE_KEY } from './game/settings';
+import { GameSettings, parseSettings, setActiveSettings } from './game/settings';
+import { loadValue, saveValue } from './platform/storage';
+import { subscribeLifecycle } from './platform/lifecycle';
 import type { QualityTier } from './game/quality';
 import {
   BallPhysicsState,
@@ -92,7 +94,7 @@ export default function App() {
   // Tournament and Player Profile
   const [profile, setProfile] = useState<PlayerProfile>(() => {
     try {
-      const saved = localStorage.getItem('footgolf_profile');
+      const saved = loadValue('footgolf_profile');
       if (saved) {
         const parsed = JSON.parse(saved);
         return {
@@ -187,7 +189,7 @@ export default function App() {
   // Daily Missions System
   const [dailyMissionsState, setDailyMissionsState] = useState<DailyMissionsState>(() => {
     try {
-      const saved = localStorage.getItem('footgolf_daily_missions');
+      const saved = loadValue('footgolf_daily_missions');
       return getOrRefreshDailyMissions(saved ? JSON.parse(saved) : undefined);
     } catch {
       return getOrRefreshDailyMissions();
@@ -220,7 +222,7 @@ export default function App() {
   // Player settings (quality, reduced motion, vibration)
   const [settings, setSettings] = useState<GameSettings>(() => {
     try {
-      return parseSettings(localStorage.getItem(SETTINGS_STORAGE_KEY));
+      return parseSettings(loadValue('footgolf_settings'));
     } catch {
       return parseSettings(null);
     }
@@ -231,16 +233,61 @@ export default function App() {
   settingsRef.current = settings;
 
   useEffect(() => {
-    try {
-      localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings));
-    } catch {
-      // Storage unavailable (private mode); settings stay in memory
-    }
+    saveValue('footgolf_settings', JSON.stringify(settings));
   }, [settings]);
 
   useEffect(() => {
     rendererRef.current?.setQualityPreference(settings.quality);
   }, [settings.quality]);
+
+  // App lifecycle: pause rendering and audio in the background, and map the Android back button.
+  const lifecycleStateRef = useRef({
+    screen,
+    modals: [] as { open: boolean; close: () => void }[],
+  });
+  lifecycleStateRef.current = {
+    screen,
+    modals: [
+      { open: activeReplayTrack !== null, close: () => setActiveReplayTrack(null) },
+      { open: showSpinModal, close: () => setShowSpinModal(false) },
+      { open: showCourseSelect, close: () => setShowCourseSelect(false) },
+      { open: showTournamentHub, close: () => setShowTournamentHub(false) },
+      { open: showTournamentLeaderboard, close: () => setShowTournamentLeaderboard(false) },
+      { open: showLockerRoom, close: () => setShowLockerRoom(false) },
+      { open: showDailyMissions, close: () => setShowDailyMissions(false) },
+    ],
+  };
+  useEffect(() => {
+    return subscribeLifecycle({
+      onBackground: () => {
+        rendererRef.current?.setPaused(true);
+        soundEngine.suspendForBackground();
+        if (lifecycleStateRef.current.screen === 'playing') setScreen('paused');
+      },
+      onForeground: () => {
+        rendererRef.current?.setPaused(false);
+        soundEngine.resumeFromBackground();
+      },
+      onBack: () => {
+        const { screen: current, modals } = lifecycleStateRef.current;
+        const openModal = modals.find((m) => m.open);
+        if (openModal) {
+          openModal.close();
+          return true;
+        }
+        if (current === 'playing') {
+          setScreen('paused');
+          return true;
+        }
+        if (current === 'paused') {
+          setScreen('playing');
+          return true;
+        }
+        // On the title screen, let Android close the app
+        return current !== 'title';
+      },
+    });
+  }, []);
 
   // Precompute bot scores for the current tournament hole one bot at a time, so the
   // physics simulation doesn't stall the frame when the player holes out.
@@ -263,7 +310,7 @@ export default function App() {
 
   // Save daily missions state
   useEffect(() => {
-    localStorage.setItem('footgolf_daily_missions', JSON.stringify(dailyMissionsState));
+    saveValue('footgolf_daily_missions', JSON.stringify(dailyMissionsState));
   }, [dailyMissionsState]);
 
   // Live Physics Ball State (Mutable ref for 60Hz loop decoupled from React state)
@@ -294,7 +341,7 @@ export default function App() {
 
   // Save profile changes
   useEffect(() => {
-    localStorage.setItem('footgolf_profile', JSON.stringify(profile));
+    saveValue('footgolf_profile', JSON.stringify(profile));
   }, [profile]);
 
   // Autostart query parameter support (?autostart=1)

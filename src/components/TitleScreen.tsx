@@ -41,7 +41,7 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
   }, [onStartGame]);
 
   return (
-    <div className="fixed inset-0 z-40 flex flex-col justify-between p-6 sm:p-10 pointer-events-none select-none">
+    <div className="safe-inset z-40 flex flex-col justify-between p-6 sm:p-10 pointer-events-none select-none">
       {/* Top Header: Mute / Sound status */}
       <div className="flex justify-between items-center w-full">
         <div className="flex items-center gap-2 bg-slate-950/70 border border-emerald-500/30 px-3 py-1.5 rounded-full pointer-events-auto shadow-md">
