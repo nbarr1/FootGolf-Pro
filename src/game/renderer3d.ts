@@ -1871,7 +1871,10 @@ export class FootGolfRenderer {
   /**
    * Set aerodynamic flight state
    */
+  private flightHeadingRad: number | null = null;
+
   public setBallInFlight(inFlight: boolean) {
+    if (inFlight !== this.isBallInFlight) this.flightHeadingRad = null;
     this.isBallInFlight = inFlight;
     if (!inFlight) {
       this.flightTrailPositions = [];
@@ -1933,6 +1936,21 @@ export class FootGolfRenderer {
       // Real shadow maps already draw the ball's shadow; keep the blob only without them
       this.ballShadow.visible = !this.renderer.shadowMap.enabled;
       this.ballShadow.position.y = -BALL_RADIUS - heightAbove + 0.012;
+    }
+
+    // Track a smoothed horizontal heading for the flight camera
+    if (vel && this.isBallInFlight) {
+      const hs = Math.hypot(vel.x, vel.z);
+      if (hs > 1.5) {
+        const target = Math.atan2(vel.x, vel.z);
+        if (this.flightHeadingRad === null) {
+          this.flightHeadingRad = target;
+        } else {
+          let delta = target - this.flightHeadingRad;
+          delta = Math.atan2(Math.sin(delta), Math.cos(delta));
+          this.flightHeadingRad += delta * 0.04;
+        }
+      }
     }
 
     // Realistic roll rotation along movement direction
@@ -2589,16 +2607,18 @@ export class FootGolfRenderer {
       // Dynamic broadcast follow camera with forward lead and terrain collision avoidance
       const followDist = 6.2;
       const followHeight = 3.2;
-      const camX = this.ballGroup.position.x - Math.sin(this.aimAngleRad) * followDist;
-      const camZ = this.ballGroup.position.z - Math.cos(this.aimAngleRad) * followDist;
+      // Follow the ball's actual heading so hooks and slices stay in frame
+      const heading = this.flightHeadingRad ?? this.aimAngleRad;
+      const camX = this.ballGroup.position.x - Math.sin(heading) * followDist;
+      const camZ = this.ballGroup.position.z - Math.cos(heading) * followDist;
       const groundAtCam = getTerrainHeight(hole, camX, camZ);
       const camY = Math.max(this.ballGroup.position.y + followHeight, groundAtCam + 2.4);
 
       this.targetCamPos.set(camX, camY, camZ);
       this.targetLookAt.set(
-        this.ballGroup.position.x + Math.sin(this.aimAngleRad) * 14,
+        this.ballGroup.position.x + Math.sin(heading) * 14,
         this.ballGroup.position.y * 0.7 + 0.5,
-        this.ballGroup.position.z + Math.cos(this.aimAngleRad) * 14
+        this.ballGroup.position.z + Math.cos(heading) * 14
       );
     } else if (this.cameraMode === 'green') {
       // Zoomed on Green & Pin
@@ -3127,6 +3147,56 @@ export class FootGolfRenderer {
     }
   }
 
+  private hitStopUntil = 0;
+
+  /** Freezes character animation briefly (paired with the physics hit-stop on perfect strikes). */
+  public triggerHitStop(ms: number) {
+    this.hitStopUntil = performance.now() + ms;
+    this.triggerCameraImpact(0.22);
+  }
+
+  private windGhostGroup: THREE.Group | null = null;
+  private windGhostLine: THREE.Line | null = null;
+
+  /**
+   * Shows where the shot would land without wind (a faint ring) and a line to the
+   * wind-adjusted landing spot, so players can learn how far to aim off.
+   */
+  public setWindGhost(noWindLanding: Vector3D | null, windLanding: Vector3D | null) {
+    if (!this.windGhostGroup) {
+      const group = new THREE.Group();
+      const ringGeom = new THREE.RingGeometry(0.85, 1.05, 40);
+      ringGeom.rotateX(-Math.PI / 2);
+      const ring = new THREE.Mesh(
+        ringGeom,
+        new THREE.MeshBasicMaterial({ color: 0x7dd3fc, transparent: true, opacity: 0.55, depthWrite: false })
+      );
+      ring.renderOrder = 5;
+      group.add(ring);
+      const lineGeom = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
+      const line = new THREE.Line(
+        lineGeom,
+        new THREE.LineBasicMaterial({ color: 0x7dd3fc, transparent: true, opacity: 0.7, depthWrite: false })
+      );
+      line.renderOrder = 5;
+      this.windGhostLine = line;
+      this.scene.add(group, line);
+      this.windGhostGroup = group;
+    }
+    const show = !!noWindLanding && !!windLanding && Math.hypot(noWindLanding.x - windLanding.x, noWindLanding.z - windLanding.z) > 0.6;
+    this.windGhostGroup.visible = show;
+    this.windGhostLine!.visible = show;
+    if (!show || !noWindLanding || !windLanding || !this.activeHole) return;
+    const y0 = getTerrainHeight(this.activeHole, noWindLanding.x, noWindLanding.z) + 0.05;
+    const y1 = getTerrainHeight(this.activeHole, windLanding.x, windLanding.z) + 0.05;
+    this.windGhostGroup.position.set(noWindLanding.x, y0, noWindLanding.z);
+    const pos = this.windGhostLine!.geometry.attributes.position as THREE.BufferAttribute;
+    pos.setXYZ(0, noWindLanding.x, y0, noWindLanding.z);
+    pos.setXYZ(1, windLanding.x, y1, windLanding.z);
+    pos.needsUpdate = true;
+    this.windGhostLine!.geometry.computeBoundingSphere();
+  }
+
   /** Moves only the visible ball (no trail or spin updates); used for render interpolation. */
   public setBallRenderPosition(pos: Vector3D) {
     this.ballGroup.position.set(pos.x, pos.y, pos.z);
@@ -3235,7 +3305,8 @@ export class FootGolfRenderer {
       // 3D Player Character & Camera motion
       if (this.activeHole) {
         const terrainH = getTerrainHeight(this.activeHole, this.ballGroup.position.x, this.ballGroup.position.z);
-        this.playerCharacter.update(dt, this.aimAngleRad, this.ballGroup.position, terrainH);
+        const charDt = currentTime < this.hitStopUntil ? 0 : dt;
+        this.playerCharacter.update(charDt, this.aimAngleRad, this.ballGroup.position, terrainH);
         this.updateCamera(dt, this.activeHole);
       }
 

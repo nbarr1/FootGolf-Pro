@@ -112,6 +112,7 @@ export const GameHUD: React.FC<GameHUDProps> = ({
   const [isMenuOpen, setIsMenuOpen] = useState<boolean>(false);
   const [showEmbeddedMap, setShowEmbeddedMap] = useState<boolean>(false);
 
+  const liePenalty = getEstimatedKickDistance(kickType, 1, ballLie).liePenaltyPercent;
   const distToPinMeters = Math.round(
     Math.hypot(pinPos.x - ballPos.x, pinPos.z - ballPos.z)
   );
@@ -133,11 +134,11 @@ export const GameHUD: React.FC<GameHUDProps> = ({
             <div className="flex items-center gap-1.5 font-black text-xs">
               <Flag className="w-4 h-4 text-emerald-400 fill-emerald-400/20" />
               <span className="font-mono text-sm font-black text-yellow-300">{distToPinMeters}m</span>
-              <span className="whitespace-nowrap text-[10px] text-slate-400 uppercase tracking-wider font-bold">to pin</span>
+              <span className="hidden sm:inline whitespace-nowrap text-[10px] text-slate-400 uppercase tracking-wider font-bold">to pin</span>
             </div>
             <div className="h-3.5 w-px bg-slate-700/80" />
             <div className="flex items-center gap-1">
-              <span className="text-[10px] font-bold text-slate-400 uppercase">Lie:</span>
+              <span className="hidden sm:inline text-[10px] font-bold text-slate-400 uppercase">Lie:</span>
               <span
                 className={`text-[11px] font-black uppercase tracking-wider ${
                   ballLie === 'green'
@@ -153,6 +154,14 @@ export const GameHUD: React.FC<GameHUDProps> = ({
               >
                 {ballLie}
               </span>
+              {liePenalty > 0 && (
+                <span
+                  className="ml-1 rounded-md bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-black text-amber-300"
+                  title={`Kicks from ${ballLie} lose ${liePenalty}% power`}
+                >
+                  −{liePenalty}%
+                </span>
+              )}
             </div>
           </div>
 

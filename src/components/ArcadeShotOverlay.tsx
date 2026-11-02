@@ -13,13 +13,14 @@ import {
 } from '../game/arcadeControls';
 import {
   calculateNeedleFrequency,
+  evaluateTimingRelease,
   getNeedlePosition,
   TimingRatingResult,
 } from '../game/timingGauge';
 import { evaluatePuttingPullback } from '../game/puttingSystem';
 import { getEstimatedKickDistance } from '../game/physics';
 import { KickType, PlayerAttributes, SpinControl, SurfaceType } from '../types';
-import { triggerHaptic } from '../game/haptics';
+import { triggerHaptic, triggerSelectionTick } from '../game/haptics';
 import { Zap, Target, Flag, ChevronLeft, ChevronRight } from 'lucide-react';
 
 interface ArcadeShotOverlayProps {
@@ -67,6 +68,7 @@ export const ArcadeShotOverlay: React.FC<ArcadeShotOverlayProps> = ({
   const dragOriginRef = useRef<{ x: number; y: number } | null>(null);
   const pullStartTimeRef = useRef<number>(0);
   const needleValueRef = useRef<number>(0);
+  const lastNeedleBandRef = useRef<string>('');
   const powerNormalizedRef = useRef<number>(0);
   const centeringOffsetRef = useRef<number>(0);
   const isPullingRef = useRef<boolean>(false);
@@ -109,10 +111,16 @@ export const ArcadeShotOverlay: React.FC<ArcadeShotOverlayProps> = ({
       setNeedleValue(pos);
       onNeedleUpdate?.(pos, true);
 
-      // Light haptic feedback tick on sweet spot crossing
-      if (Math.abs(pos) < 0.08 && performance.now() - lastSweetSpotHapticRef.current > 280) {
-        lastSweetSpotHapticRef.current = performance.now();
-        triggerHaptic('light');
+      // Haptic ticks as the needle crosses rating bands, with a firmer pulse entering "perfect"
+      const band = evaluateTimingRelease(pos).rating;
+      if (band !== lastNeedleBandRef.current) {
+        lastNeedleBandRef.current = band;
+        if (band === 'perfect' && performance.now() - lastSweetSpotHapticRef.current > 180) {
+          lastSweetSpotHapticRef.current = performance.now();
+          triggerHaptic('light');
+        } else {
+          triggerSelectionTick();
+        }
       }
 
       animFrameIdRef.current = requestAnimationFrame(updateLoop);

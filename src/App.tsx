@@ -28,6 +28,7 @@ import {
 import { triggerHaptic } from './game/haptics';
 import { scoreHoleOut, strokesTakenFromCounter } from './game/core/holeScoring';
 import { chooseKickType } from './game/core/botPlayer';
+import type { BotWorkerRequest, BotWorkerResult } from './workers/botWorker';
 import { GameSettings, parseSettings, setActiveSettings } from './game/settings';
 import { loadValue, saveValue } from './platform/storage';
 import { subscribeLifecycle } from './platform/lifecycle';
@@ -289,12 +290,29 @@ export default function App() {
     });
   }, []);
 
-  // Precompute bot scores for the current tournament hole one bot at a time, so the
-  // physics simulation doesn't stall the frame when the player holes out.
+  // Precompute bot scores for the current tournament hole in a Web Worker so physics
+  // simulation never blocks rendering. Falls back to the main thread, one bot at a time.
   const botScoresRef = useRef<{ key: string; scores: Record<string, number> }>({ key: '', scores: {} });
+  const botWorkerRef = useRef<Worker | null>(null);
+  useEffect(() => {
+    try {
+      const worker = new Worker(new URL('./workers/botWorker.ts', import.meta.url), { type: 'module' });
+      worker.onmessage = (e: MessageEvent<BotWorkerResult>) => {
+        if (botScoresRef.current.key === e.data.key) botScoresRef.current.scores[e.data.competitorId] = e.data.strokes;
+      };
+      botWorkerRef.current = worker;
+      return () => worker.terminate();
+    } catch {
+      botWorkerRef.current = null;
+    }
+  }, []);
   useEffect(() => {
     const key = `${tournament.id}:${tournament.currentHoleIndex}`;
     botScoresRef.current = { key, scores: {} };
+    if (botWorkerRef.current) {
+      botWorkerRef.current.postMessage({ key, tournament, hole: currentHole, wind } satisfies BotWorkerRequest);
+      return;
+    }
     const bots = tournament.leaderboard.filter((c) => !c.isPlayer);
     let index = 0;
     let timer: ReturnType<typeof setTimeout>;
@@ -374,6 +392,23 @@ export default function App() {
         );
         rendererRef.current.updateTrajectoryLine(trajectory, true);
 
+        // Wind guide: compare against the same shot with no wind
+        if (kType !== 'putt' && wind.speed > 0.5 && trajectory.length > 1) {
+          const calm = predictTrajectory(
+            ballStateRef.current.position,
+            kType,
+            p,
+            angle,
+            sp,
+            ballStateRef.current.lie,
+            currentHole,
+            { speed: 0, angleRad: 0 }
+          );
+          rendererRef.current.setWindGhost(calm[calm.length - 1] ?? null, trajectory[trajectory.length - 1]);
+        } else {
+          rendererRef.current.setWindGhost(null, null);
+        }
+
         // Putting Read Line when on green or putting
         if (kType === 'putt' || ballStateRef.current.lie === 'green') {
           const readLine = generatePuttingReadLine(
@@ -408,6 +443,7 @@ export default function App() {
         rendererRef.current.updateGreenGrid(currentHole, shouldShowGrid);
       } else {
         rendererRef.current.updateTrajectoryLine([], false);
+        rendererRef.current.setWindGhost(null, null);
         rendererRef.current.updatePuttingReadLine([], false);
         rendererRef.current.updateGreenGrid(currentHole, false);
         setPuttingReadLineData(null);
@@ -493,6 +529,21 @@ export default function App() {
       if (inHitStop) {
         // Freeze the simulation briefly on contact so strikes feel weighty
       } else if (!state.isSleeping && !state.inHole) {
+        // Slow motion when a rolling ball approaches the cup with a chance to drop
+        const toPinX = currentHole.pinPosition.x - state.position.x;
+        const toPinZ = currentHole.pinPosition.z - state.position.z;
+        const pinDist = Math.hypot(toPinX, toPinZ);
+        const speed = Math.hypot(state.velocity.x, state.velocity.z);
+        const headingToCup = speed > 0.05 && (state.velocity.x * toPinX + state.velocity.z * toPinZ) / (speed * Math.max(pinDist, 0.01)) > 0.92;
+        const dramatic =
+          !settingsRef.current.reducedMotion &&
+          !isFastForwardRef.current &&
+          state.isGrounded &&
+          pinDist < 2.8 &&
+          speed < 4.0 &&
+          headingToCup;
+        const targetScale = dramatic ? 0.4 : 1.0;
+        timeScaleRef.current += (targetScale - timeScaleRef.current) * Math.min(1, rawDt * 8);
         const timeScale = (isFastForwardRef.current ? 2.4 : 1.0) * timeScaleRef.current;
         // Cap accumulator to 0.12s to prevent spiral of death during backgrounding or frame hitches
         accumulator += Math.min(rawDt * timeScale, 0.12);
@@ -862,9 +913,10 @@ export default function App() {
           }
         }
       }
-      } else {
+      } else if (!inHitStop) {
         accumulator = 0;
         prevBallPosRef.current = null;
+        timeScaleRef.current = 1;
       }
     }
 
@@ -1041,6 +1093,7 @@ export default function App() {
         rendererRef.current?.setCameraMode('flight');
         setCameraMode('flight');
         rendererRef.current?.updateTrajectoryLine([], false);
+        rendererRef.current?.setWindGhost(null, null);
       };
 
       if (rendererRef.current) {
@@ -1082,6 +1135,11 @@ export default function App() {
 
       const fireStrike = () => {
         if (arcade.timing.rating === 'perfect') {
+          // Hit-stop: a brief freeze at contact makes perfect strikes feel weighty
+          if (!settingsRef.current.reducedMotion) {
+            hitStopUntilRef.current = performance.now() + 85;
+            rendererRef.current?.triggerHitStop(85);
+          }
           triggerHaptic('pure');
           soundEngine.playSweetSpotKick(arcade.power, kickType);
           rendererRef.current?.emitPureStrike(ballStateRef.current.position);
@@ -1146,6 +1204,7 @@ export default function App() {
         rendererRef.current?.setCameraMode('flight');
         setCameraMode('flight');
         rendererRef.current?.updateTrajectoryLine([], false);
+        rendererRef.current?.setWindGhost(null, null);
       };
 
       if (rendererRef.current) {
@@ -1283,6 +1342,7 @@ export default function App() {
       rendererRef.current?.setCameraMode('flight');
       setCameraMode('flight');
       rendererRef.current?.updateTrajectoryLine([], false);
+      rendererRef.current?.setWindGhost(null, null);
       rendererRef.current?.updatePuttingReadLine([], false);
     };
 

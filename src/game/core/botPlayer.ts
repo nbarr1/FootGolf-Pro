@@ -92,22 +92,29 @@ export function planBotShot(hole: HoleData, pos: Vector3D, lie: SurfaceType, win
     }
   }
 
+  // Score each candidate across likely mistimings so lines that only work when struck
+  // perfectly (for example, finishing beside water) lose to safer options.
+  const timings = preferred === 'putt' ? [0] : [0, -0.3, 0.3];
   let best = candidates[0];
   let bestScore = Infinity;
   for (const c of candidates) {
-    const r = simulateHeadlessShot(
-      { startPos: pos, kickType: c.kickType, powerNormalized: c.power, timingDeviation: 0, aimAngleRad: c.aim, spin: { top: 0, side: 0 }, currentLie: lie, wind },
-      hole
-    );
-    let score: number;
-    if (r.inHole) {
-      score = -1000;
-    } else {
+    let total = 0;
+    for (const timingDeviation of timings) {
+      const r = simulateHeadlessShot(
+        { startPos: pos, kickType: c.kickType, powerNormalized: c.power, timingDeviation, aimAngleRad: c.aim, spin: { top: 0, side: 0 }, currentLie: lie, wind },
+        hole
+      );
+      if (r.inHole) {
+        total += -1000;
+        continue;
+      }
       const restLie = getSurfaceLie(hole, r.finalRestSpot.x, r.finalRestSpot.z);
-      score = horizontalDist(r.finalRestSpot, pin);
+      let score = horizontalDist(r.finalRestSpot, pin);
       if (restLie === 'water' || restLie === 'boundary') score += 1000;
       score += LIE_PENALTY_METERS[restLie] ?? 0;
+      total += score;
     }
+    const score = total / timings.length;
     if (score < bestScore) {
       bestScore = score;
       best = c;

@@ -4,8 +4,9 @@
  */
 
 import { CourseData } from '../types';
+import { generateHoles, HoleSpec } from './holeGenerator';
 
-export const COURSES: CourseData[] = [
+const HAND_BUILT_COURSES: CourseData[] = [
   {
     id: 'pine_valley',
     name: 'Pine Valley Links',
@@ -556,3 +557,23 @@ export const COURSES: CourseData[] = [
     ],
   },
 ];
+
+/**
+ * Holes 4-9 for each course come from the seeded generator. Each seed was chosen by
+ * simulating physics bots on candidate layouts and keeping holes that play near par;
+ * holeGenerator.test.ts re-checks them.
+ */
+const PARS_4_TO_9: HoleSpec['par'][] = [4, 3, 4, 5, 4, 4];
+export const GENERATED_HOLE_SEEDS: Record<string, number[]> = {
+  pine_valley: [10099, 90807, 14424, 70780, 73431, 60189],
+  sunset_dunes: [22525, 79894, 58042, 91069, 41399, 40051],
+  alpine_highlands: [18361, 14926, 12613, 35947, 7881, 18573],
+  sakura_imperial: [7390, 9059, 37148, 27075, 90798, 80719],
+};
+
+export const COURSES: CourseData[] = HAND_BUILT_COURSES.map((course) => {
+  const seeds = GENERATED_HOLE_SEEDS[course.id];
+  if (!seeds) return course;
+  const specs: HoleSpec[] = seeds.map((seed, i) => ({ number: course.holes.length + 1 + i, par: PARS_4_TO_9[i], seed }));
+  return { ...course, holes: [...course.holes, ...generateHoles(course.theme, specs)] };
+});
