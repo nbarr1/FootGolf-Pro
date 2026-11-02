@@ -285,41 +285,41 @@ Implement automatic tier selection: start on medium, sample average frame time o
 
 ### Phase 0: Foundation (about 1 week)
 
-- [ ] Fix the npm install conflict: bump `esbuild` to `^0.28` or remove it, since Vite bundles its own.
-- [ ] Remove unused dependencies (`@google/genai`, `express`, `dotenv`) and rename the package.
-- [ ] Move screenshots out of the repository root into `docs/screenshots/`, or delete them, and add `.aistudio/` to `.gitignore`.
-- [ ] Add GitHub Actions for `lint`, `test`, and `build` on pull requests.
+- [x] Fix the npm install conflict: bump `esbuild` to `^0.28` or remove it, since Vite bundles its own.
+- [x] Remove unused dependencies (`@google/genai`, `express`, `dotenv`) and rename the package.
+- [x] Move screenshots out of the repository root into `docs/screenshots/`. (`.aistudio/` was left in place because AI Studio manages it.)
+- [x] Add GitHub Actions for `lint`, `test`, and `build` on pull requests, plus a debug APK build.
 
 ### Phase 1: Performance and architecture (about 2-3 weeks)
 
-- [ ] Introduce a Zustand store. Throttle HUD telemetry to 10-15 Hz (A1).
-- [ ] Merge the two loops into one main loop with render interpolation (A2, A7).
-- [ ] Implement real dynamic resolution and quality tiers (A3, section 5).
-- [ ] Instance or merge props (A4). Remove `backdrop-blur` (A6).
-- [ ] Extract game rules from `App.tsx` into `src/game/core/` with tests (A8).
-- [ ] Add a seeded random number generator and use it for wind and bots (A11).
+- [x] Throttle HUD telemetry to about 12 Hz (A1). A Zustand store wasn't needed for this fix and was not added.
+- [x] Merge the two loops into one main loop with render interpolation (A2, A7).
+- [x] Implement real dynamic resolution and quality tiers (A3, section 5).
+- [x] Instance or merge props (A4). Remove `backdrop-blur` (A6).
+- [x] Extract hole scoring and bot play into `src/game/core/` with tests (A8, partial: `App.tsx` still holds most UI state).
+- [x] Add a seeded random number generator and use it for tournaments and bots (A11).
 
 ### Phase 2: Android shell (about 1-2 weeks)
 
-- [ ] Add Capacitor and the Android platform. Target API 36 and lock portrait orientation.
-- [ ] Add haptics, app lifecycle, preferences, status bar, and safe-area handling (A5).
-- [ ] Profile on two or three real devices with Android Studio Profiler and Chrome remote DevTools. **Go/no-go gate for the web stack (section 2.2).**
-- [ ] Set up a signed release `.aab` and an internal testing track on Play Console.
+- [x] Add Capacitor and the Android platform. Target API 36 and lock portrait orientation.
+- [x] Add haptics, app lifecycle, preferences, status bar, and safe-area handling (A5).
+- [ ] Profile on two or three real devices with Android Studio Profiler and Chrome remote DevTools. **Go/no-go gate for the web stack (section 2.2).** Needs physical devices.
+- [ ] Set up a signed release `.aab` and an internal testing track on Play Console. Needs a Play Console account and an upload key.
 
 ### Phase 3: Visual upgrade (about 3-4 weeks)
 
-- [ ] Build the asset pipeline: glTF-Transform with meshopt and KTX2, and lazy loading per course.
-- [ ] Add HDRI image-based lighting, sky, fog, and exposure tuning (section 4.1).
-- [ ] Add the splat-mapped terrain shader and adaptive terrain detail (sections 4.2.5 and 4.2.6).
-- [ ] Add glTF props and a rigged player (section 4.3).
-- [ ] Integrate three.quarks VFX and high-tier post-processing (sections 4.4 and 4.5).
+- [ ] Build the asset pipeline: glTF-Transform with meshopt and KTX2, and lazy loading per course. Deferred until art assets are chosen.
+- [x] Add image-based lighting, sky, fog, and exposure tuning (section 4.1), using a procedural sky instead of an HDRI file.
+- [x] Add a baked surface texture with a grass detail shader (section 4.2.5). Adaptive mesh detail (4.2.6) was not needed once the texture carried the edges.
+- [ ] Add glTF props and a rigged player (section 4.3). Deferred until art assets are chosen.
+- [x] Add surface-aware impact effects and high-tier post-processing (sections 4.4 and 4.5). Effects use the existing particle pool rather than three.quarks.
 
 ### Phase 4: Gameplay depth (about 3-4 weeks)
 
-- [ ] Redesign the HUD for portrait, and add the aim magnifier and needle haptics (section 3.1).
-- [ ] Add wind rings, lie modifiers, ball stats, and curl gestures (section 3.2).
-- [ ] Expand to 9 holes per course.
-- [ ] Add bots that simulate real shots (section 3.3, item 13).
+- [x] Adapt the HUD and camera for portrait, and add needle haptics, hit-stop, and cup slow motion (section 3.1). The aim magnifier is not built yet.
+- [x] Add a wind guide and lie modifiers (section 3.2). Ball stats and curl gestures are not built yet.
+- [x] Expand to 9 holes per course.
+- [x] Add bots that simulate real shots (section 3.3, item 13).
 
 ### Phase 5: Online and live operations (scope to be decided)
 
@@ -329,7 +329,45 @@ Implement automatic tier selection: start on medium, sample average frame time o
 
 ---
 
-## 7. Sources
+## 7. Implementation status
+
+The first implementation pass covered phases 0-4, except the items that need physical devices, a Play Console account, art assets, or a backend. This section records what changed, what was measured, and where the work departed from the plan.
+
+### 7.1 Bugs found and fixed along the way
+
+- **Stale stroke count at hole-out.** The physics loop's closure read the stroke count from when the hole started, so hole-out titles, rewards, and missions used the wrong number.
+- **Tournament off by one.** The HUD counter holds the stroke about to be taken, and tournaments recorded that value, so every hole was scored one stroke worse than it was played.
+- **HUD distances didn't match the ball.** On flat ground, a full drive traveled about 75 m while the HUD promised 135 m, and a full putt on a green rolled more than 100 m. That made every par 3 unreachable in one kick. Kicks are now calibrated, with a modeled drag crisis and a tested estimate kept within 20% of simulation.
+- **Bunker and tee mismatch.** The visible sand and tee areas didn't match where the physics changed surface.
+
+### 7.2 Measurements
+
+Measurements were taken in headless Chromium with a software renderer (SwiftShader), so they show relative cost, not phone frame rates.
+
+| Measurement | Before | After |
+| --- | --- | --- |
+| Prop meshes on hole 1 | 51 | 15 |
+| Draw calls, hole 1 tee shot (medium / high tier) | Not measured | 67 / 87 |
+| Main JS bundle (gzip) | 271 KB | 286 KB, plus 74 KB of post-processing loaded only on the high tier |
+| Unit tests | 44 | 80 |
+| Debug APK | None | 4.8 MB, target API 36, no native libraries |
+
+### 7.3 Departures from the plan
+
+- **Sky:** a procedural sky (three's `Sky` shader) baked per course replaces the HDRI files, which avoids several megabytes of downloads.
+- **Effects:** surface-aware impacts use the existing particle pool rather than three.quarks.
+- **State:** throttling telemetry fixed the re-render problem without adding Zustand.
+- **Holes:** holes 4-9 come from a seeded generator. Seeds were picked by running physics bots and keeping holes that play near par, and a test re-checks them.
+
+### 7.4 Remaining work
+
+- Profile on real Android devices (the go/no-go gate in section 2.2).
+- Signed release builds and Play Console setup.
+- Art: glTF props, a rigged player, and recorded audio.
+- Aim magnifier, ball stats, and curl gestures.
+- Play Games Services, asynchronous multiplayer, and seasons (phase 5).
+
+## 8. Sources
 
 Web research was carried out on November 2, 2026. Most results were secondary sources (blogs and guides), so treat specific dates and figures as provisional until confirmed against official documentation.
 
