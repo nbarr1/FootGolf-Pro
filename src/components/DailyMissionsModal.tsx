@@ -38,6 +38,7 @@ export const DailyMissionsModal: React.FC<DailyMissionsModalProps> = ({
   const handleClaimClick = (mission: DailyMission) => {
     soundEngine.playTap();
     confetti({
+        disableForReducedMotion: true,
       particleCount: 60,
       spread: 60,
       origin: { y: 0.6 },

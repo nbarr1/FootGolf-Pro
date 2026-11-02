@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createRng, deriveSeed, randomSeed, shuffled } from './rng';
+import { simulateBotHole, Wind } from './core/botPlayer';
 import { FootGolfBallCustomization, HoleData, PlayerProfile, TournamentCompetitor, TournamentState } from '../types';
 
 export const INITIAL_BALLS: FootGolfBallCustomization[] = [
@@ -125,7 +127,8 @@ export function createTournament(
   playerName: string,
   courseId: string,
   totalHoles: number,
-  tier: 'Regional Open' | 'Continental Cup' | 'World Championship' = 'Continental Cup'
+  tier: 'Regional Open' | 'Continental Cup' | 'World Championship' = 'Continental Cup',
+  seed: number = randomSeed()
 ): TournamentState {
   const purse = tier === 'World Championship' ? 2500 : (tier === 'Continental Cup' ? 1200 : 600);
   const trophy = tier === 'World Championship' ? 'World Cup Gold' : (tier === 'Continental Cup' ? 'Silver Shield' : 'Bronze Boot');
@@ -150,7 +153,7 @@ export function createTournament(
   ];
 
   // Pick 7 bots for an 8-player leaderboard bracket
-  const shuffledBots = [...BOT_ROSTER].sort(() => 0.5 - Math.random()).slice(0, 7);
+  const shuffledBots = shuffled(BOT_ROSTER, createRng(deriveSeed(seed, 'roster'))).slice(0, 7);
   shuffledBots.forEach((bot, idx) => {
     competitors.push({
       id: `bot-${idx + 1}`,
@@ -181,16 +184,34 @@ export function createTournament(
     totalHoles,
     leaderboard: competitors,
     roundState: 'playing_hole',
+    seed,
   };
 }
 
 /**
- * Simulates AI bots completing a hole with realistic probabilistic score distribution
+ * Strokes a bot takes on the tournament's current hole. Deterministic for a given
+ * tournament seed, bot, and hole, so results can be precomputed and reproduced.
+ */
+export function simulateBotStrokes(
+  tournament: TournamentState,
+  competitorId: string,
+  skill: number,
+  hole: HoleData,
+  wind: Wind
+): number {
+  const rng = createRng(deriveSeed(tournament.seed ?? 0, competitorId, tournament.currentHoleIndex));
+  return simulateBotHole(hole, wind, skill, rng).strokes;
+}
+
+/**
+ * Records the player's strokes and the bots' simulated strokes for the current hole.
  */
 export function advanceTournamentHole(
   tournament: TournamentState,
   playerStrokes: number,
-  currentHole: HoleData
+  currentHole: HoleData,
+  wind: Wind = { speed: 0, angleRad: 0 },
+  botScores?: Record<string, number>
 ): TournamentState {
   const updatedLeaderboard = tournament.leaderboard.map((competitor) => {
     if (competitor.isPlayer) {
@@ -209,31 +230,12 @@ export function advanceTournamentHole(
         lastHoleResult: lastResult,
       };
     } else {
-      // Simulate Bot result based on hole par and bot skill rating
-      const par = currentHole.par;
-      const roll = Math.random();
-      let botScore = par;
-
-      // Skill-weighted distribution
-      if (competitor.skillRating >= 0.92) {
-        if (roll < 0.28) botScore = par - 1; // Birdie
-        else if (roll < 0.32) botScore = par - 2; // Eagle (on par 4/5)
-        else if (roll < 0.85) botScore = par; // Par
-        else botScore = par + 1; // Bogey
-      } else if (competitor.skillRating >= 0.87) {
-        if (roll < 0.20) botScore = par - 1;
-        else if (roll < 0.78) botScore = par;
-        else if (roll < 0.95) botScore = par + 1;
-        else botScore = par + 2;
-      } else {
-        if (roll < 0.12) botScore = par - 1;
-        else if (roll < 0.65) botScore = par;
-        else if (roll < 0.90) botScore = par + 1;
-        else botScore = par + 2;
-      }
-
-      // Ensure at least 1 stroke
-      botScore = Math.max(1, botScore);
+      // Bots play the hole through the real physics (precomputed when available)
+      const botScore = Math.max(
+        1,
+        botScores?.[competitor.id] ??
+          simulateBotStrokes(tournament, competitor.id, competitor.skillRating, currentHole, wind)
+      );
 
       const strokes = [...competitor.strokesPerHole, botScore];
       const total = strokes.reduce((a, b) => a + b, 0);

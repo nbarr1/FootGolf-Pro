@@ -81,7 +81,7 @@ export const VerticalPowerFeedbackBar: React.FC<VerticalPowerFeedbackBarProps> =
       className="fixed right-1 sm:right-4 top-1/2 -translate-y-1/2 z-30 flex flex-col items-center pointer-events-auto select-none"
     >
       {/* Container Card with mobile responsive sizing */}
-      <div className="bg-slate-950/90 border border-slate-800/90 rounded-2xl p-1.5 sm:p-2.5 shadow-2xl backdrop-blur-md flex flex-col items-center w-14 sm:w-20 transition-all">
+      <div className="bg-slate-950/90 border border-slate-800/90 rounded-2xl p-1.5 sm:p-2.5 shadow-2xl flex flex-col items-center w-14 sm:w-20 transition-all">
         {/* Practice Mode Toggle / Badge */}
         <button
           onClick={onTogglePracticeMode}

@@ -133,6 +133,8 @@ export interface TournamentState {
   totalHoles: number;
   leaderboard: TournamentCompetitor[];
   roundState: 'ready' | 'playing_hole' | 'hole_recap' | 'podium';
+  /** Seed for reproducible bot selection and bot play. */
+  seed: number;
 }
 
 export interface FootGolfBallCustomization {

@@ -13,13 +13,14 @@ import {
 } from '../game/arcadeControls';
 import {
   calculateNeedleFrequency,
+  evaluateTimingRelease,
   getNeedlePosition,
   TimingRatingResult,
 } from '../game/timingGauge';
 import { evaluatePuttingPullback } from '../game/puttingSystem';
 import { getEstimatedKickDistance } from '../game/physics';
 import { KickType, PlayerAttributes, SpinControl, SurfaceType } from '../types';
-import { triggerHaptic } from '../game/haptics';
+import { triggerHaptic, triggerSelectionTick } from '../game/haptics';
 import { Zap, Target, Flag, ChevronLeft, ChevronRight } from 'lucide-react';
 
 interface ArcadeShotOverlayProps {
@@ -67,6 +68,7 @@ export const ArcadeShotOverlay: React.FC<ArcadeShotOverlayProps> = ({
   const dragOriginRef = useRef<{ x: number; y: number } | null>(null);
   const pullStartTimeRef = useRef<number>(0);
   const needleValueRef = useRef<number>(0);
+  const lastNeedleBandRef = useRef<string>('');
   const powerNormalizedRef = useRef<number>(0);
   const centeringOffsetRef = useRef<number>(0);
   const isPullingRef = useRef<boolean>(false);
@@ -109,10 +111,16 @@ export const ArcadeShotOverlay: React.FC<ArcadeShotOverlayProps> = ({
       setNeedleValue(pos);
       onNeedleUpdate?.(pos, true);
 
-      // Light haptic feedback tick on sweet spot crossing
-      if (Math.abs(pos) < 0.08 && performance.now() - lastSweetSpotHapticRef.current > 280) {
-        lastSweetSpotHapticRef.current = performance.now();
-        triggerHaptic('light');
+      // Haptic ticks as the needle crosses rating bands, with a firmer pulse entering "perfect"
+      const band = evaluateTimingRelease(pos).rating;
+      if (band !== lastNeedleBandRef.current) {
+        lastNeedleBandRef.current = band;
+        if (band === 'perfect' && performance.now() - lastSweetSpotHapticRef.current > 180) {
+          lastSweetSpotHapticRef.current = performance.now();
+          triggerHaptic('light');
+        } else {
+          triggerSelectionTick();
+        }
       }
 
       animFrameIdRef.current = requestAnimationFrame(updateLoop);
@@ -245,7 +253,7 @@ export const ArcadeShotOverlay: React.FC<ArcadeShotOverlayProps> = ({
   const needlePercent = ((needleValue + 1.0) / 2.0) * 100; // 0% to 100% across bar
 
   return (
-    <div className="absolute inset-0 pointer-events-none select-none z-30 flex flex-col justify-end">
+    <div className="safe-inset pointer-events-none select-none z-30 flex flex-col justify-end">
       {/* Upper Area: Drag to Aim Pan on 3D field (below top header bar) */}
       {!disabled && !isPulling && (
         <div
@@ -262,7 +270,7 @@ export const ArcadeShotOverlay: React.FC<ArcadeShotOverlayProps> = ({
         {/* 1. Timing Release Banner Feedback */}
         {activeRating && (
           <div
-            className="mb-4 px-6 py-2 rounded-full font-black text-xl tracking-wider shadow-2xl animate-bounce border-2 backdrop-blur-md"
+            className="mb-4 px-6 py-2 rounded-full font-black text-xl tracking-wider shadow-2xl animate-bounce border-2"
             style={{
               backgroundColor: `${activeRating.colorHex}22`,
               borderColor: activeRating.colorHex,
@@ -283,7 +291,7 @@ export const ArcadeShotOverlay: React.FC<ArcadeShotOverlayProps> = ({
 
         {/* 3. Putting Speed Window Indicator (When putting) */}
         {isPulling && kickType === 'putt' && puttingEval && (
-          <div className="mb-2 px-4 py-2 rounded-xl bg-slate-900/90 border border-emerald-500/40 text-center backdrop-blur-md shadow-xl flex items-center gap-3">
+          <div className="mb-2 px-4 py-2 rounded-xl bg-slate-900/90 border border-emerald-500/40 text-center shadow-xl flex items-center gap-3">
             <Flag className="w-4 h-4 text-emerald-400" />
             <div>
               <div className="text-xs font-semibold text-slate-300">
@@ -301,7 +309,7 @@ export const ArcadeShotOverlay: React.FC<ArcadeShotOverlayProps> = ({
 
         {/* 4. Arcade Timing Needle Gauge Ribbon (Visible during active pullback) */}
         {isPulling && (
-          <div className="w-72 sm:w-80 mb-3 bg-slate-950/85 backdrop-blur-md rounded-2xl p-2.5 border border-slate-700/60 shadow-2xl">
+          <div className="w-72 sm:w-80 mb-3 bg-slate-950/85 rounded-2xl p-2.5 border border-slate-700/60 shadow-2xl">
             <div className="flex justify-between items-center text-[10px] uppercase font-bold text-slate-400 px-1 mb-1">
               <span className="text-red-400">Slice</span>
               <span className="text-amber-400">Good</span>
@@ -344,7 +352,7 @@ export const ArcadeShotOverlay: React.FC<ArcadeShotOverlayProps> = ({
 
         {/* Shot Type & Distance At-A-Glance Selector (visible when idle / aiming) */}
         {!disabled && !isPulling && (
-          <div className="mb-3 flex items-center gap-1.5 bg-slate-950/90 border border-slate-700/80 backdrop-blur-md p-1.5 rounded-2xl shadow-2xl pointer-events-auto">
+          <div className="mb-3 flex items-center gap-1.5 bg-slate-950/90 border border-slate-700/80 p-1.5 rounded-2xl shadow-2xl pointer-events-auto">
             {(['drive', 'chip', 'putt'] as KickType[]).map((type) => {
               const isActive = kickType === type;
               const est = getEstimatedKickDistance(type, 1.0, currentLie);
@@ -381,7 +389,7 @@ export const ArcadeShotOverlay: React.FC<ArcadeShotOverlayProps> = ({
               {!isPulling && (
                 <button
                   onClick={() => onAimNudge?.(0.045)}
-                  className="p-3 rounded-full bg-slate-900/80 border border-slate-700/80 text-slate-200 hover:text-yellow-400 active:scale-90 transition-all shadow-lg backdrop-blur-md cursor-pointer"
+                  className="p-3 rounded-full bg-slate-900/80 border border-slate-700/80 text-slate-200 hover:text-yellow-400 active:scale-90 transition-all shadow-lg cursor-pointer"
                   title="Aim Left"
                 >
                   <ChevronLeft className="w-5 h-5" />
@@ -487,7 +495,7 @@ export const ArcadeShotOverlay: React.FC<ArcadeShotOverlayProps> = ({
               {!isPulling && (
                 <button
                   onClick={() => onAimNudge?.(-0.045)}
-                  className="p-3 rounded-full bg-slate-900/80 border border-slate-700/80 text-slate-200 hover:text-yellow-400 active:scale-90 transition-all shadow-lg backdrop-blur-md cursor-pointer"
+                  className="p-3 rounded-full bg-slate-900/80 border border-slate-700/80 text-slate-200 hover:text-yellow-400 active:scale-90 transition-all shadow-lg cursor-pointer"
                   title="Aim Right"
                 >
                   <ChevronRight className="w-5 h-5" />

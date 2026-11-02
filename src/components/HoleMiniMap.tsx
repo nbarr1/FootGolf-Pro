@@ -122,7 +122,7 @@ export const HoleMiniMap: React.FC<HoleMiniMapProps> = ({
     return (
       <button
         onClick={onToggleOpen}
-        className="pointer-events-auto bg-slate-950/90 border border-emerald-500/50 hover:border-emerald-400 text-emerald-300 hover:text-white px-2.5 py-1.5 rounded-xl text-xs font-bold shadow-xl flex items-center gap-1.5 backdrop-blur-md transition-all active:scale-95"
+        className="pointer-events-auto bg-slate-950/90 border border-emerald-500/50 hover:border-emerald-400 text-emerald-300 hover:text-white px-2.5 py-1.5 rounded-xl text-xs font-bold shadow-xl flex items-center gap-1.5 transition-all active:scale-95"
         title="Open Hole Mini-Map [N]"
         aria-label="Open Hole Mini-Map"
       >
@@ -137,7 +137,7 @@ export const HoleMiniMap: React.FC<HoleMiniMapProps> = ({
 
   return (
     <div
-      className={`pointer-events-auto bg-slate-950/92 border border-emerald-500/40 rounded-2xl shadow-2xl backdrop-blur-md overflow-hidden flex flex-col transition-all duration-200 select-none ${
+      className={`pointer-events-auto bg-slate-950/92 border border-emerald-500/40 rounded-2xl shadow-2xl overflow-hidden flex flex-col transition-all duration-200 select-none ${
         isTacticalSize ? 'w-[250px]' : 'w-[155px]'
       }`}
       style={{ zIndex: 35 }}

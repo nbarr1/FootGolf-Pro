@@ -4,15 +4,29 @@
  */
 
 import * as THREE from 'three';
-import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
+import { Sky } from 'three/examples/jsm/objects/Sky.js';
+import type { EffectComposer } from 'postprocessing';
 import {
   BALL_RADIUS,
   CUP_RADIUS,
   getTerrainHeight,
   getTerrainNormal,
+  getSurfaceLie,
 } from './physics';
 import { generateGreenGrid, GreenGridSpec } from './greenGrid';
 import { PlayerCharacter } from './playerCharacter';
+import { getActiveSettings } from './settings';
+import { AtmosphereSettings, getAtmosphere, sunDirection } from './atmosphere';
+import { batchStaticMeshes, BatchResult, disposeChildren } from './staticBatcher';
+import {
+  computePixelRatio,
+  FrameTimeMonitor,
+  QUALITY_PRESETS,
+  QualityPreference,
+  QualitySettings,
+  QualityTier,
+  resolveInitialTier,
+} from './quality';
 import { CourseData, HoleData, KickType, MotionTrailConfig, MotionTrailStyleId, SpinControl, Vector3D } from '../types';
 import { DEFAULT_MOTION_TRAIL_CONFIGS, getMotionTrailPreset, calculateDynamicTrailColor } from './motionTrails';
 
@@ -158,7 +172,7 @@ export class FootGolfRenderer {
   private cameraImpactTrauma: number = 0;
   private currentDrsScale: number = 1.0;
 
-  constructor(container: HTMLElement, course: CourseData, hole: HoleData) {
+  constructor(container: HTMLElement, course: CourseData, hole: HoleData, qualityPref: QualityPreference = 'auto') {
 
     this.container = container;
 
@@ -186,33 +200,31 @@ export class FootGolfRenderer {
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.15;
-    this.renderer.setPixelRatio(this.isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, 2));
+    // Debug override (?forceQuality=high) to inspect tiers on machines with software GL
+    const forced = new URLSearchParams(window.location.search).get('forceQuality') as QualityTier | null;
+    if (forced && forced in QUALITY_PRESETS) this.isSoftwareGl = false;
+    this.qualitySettings = QUALITY_PRESETS[forced && forced in QUALITY_PRESETS ? forced : resolveInitialTier(qualityPref, this.isSoftwareGl)];
+    this.frameMonitor = new FrameTimeMonitor(this.qualitySettings, qualityPref === 'auto' && !this.isSoftwareGl);
+    this.renderer.setPixelRatio(computePixelRatio(this.qualitySettings, window.devicePixelRatio, 1));
     this.renderer.setSize(container.clientWidth || 800, container.clientHeight || 600);
-    this.renderer.shadowMap.enabled = !this.isSoftwareGl;
-    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.renderer.shadowMap.enabled = this.qualitySettings.shadows;
+    this.renderer.shadowMap.type = this.qualitySettings.softShadows ? THREE.PCFSoftShadowMap : THREE.PCFShadowMap;
 
     container.appendChild(this.renderer.domElement);
 
     // 3. Scene & Camera Setup
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(course.skyColor);
-    this.scene.fog = new THREE.FogExp2(course.fogColor, 0.007);
+    this.scene.fog = new THREE.FogExp2(course.fogColor, 0.0026);
 
     this.camera = new THREE.PerspectiveCamera(
-      52,
+      (container.clientWidth || 800) / (container.clientHeight || 600) < 0.9 ? 64 : 52,
       (container.clientWidth || 800) / (container.clientHeight || 600),
       0.1,
       800
     );
 
-    // 4. Studio Environment Reflection via RoomEnvironment
-    try {
-      const pmremGenerator = new THREE.PMREMGenerator(this.renderer);
-      this.scene.environment = pmremGenerator.fromScene(new RoomEnvironment(), 0.04).texture;
-      pmremGenerator.dispose();
-    } catch {
-      // RoomEnvironment fallback
-    }
+    // 4. Sky and image-based lighting are baked per course in applyAtmosphere()
 
     // 5. Balanced Lighting Rig
     this.hemiLight = new THREE.HemisphereLight('#f1f5f9', '#2d5236', 0.85);
@@ -221,9 +233,9 @@ export class FootGolfRenderer {
     this.dirLight = new THREE.DirectionalLight('#fff5e0', 1.6);
     this.dirLight.position.set(40, 80, 40);
     if (!this.isSoftwareGl) {
-      this.dirLight.castShadow = true;
-      this.dirLight.shadow.mapSize.width = 1024;
-      this.dirLight.shadow.mapSize.height = 1024;
+      this.dirLight.castShadow = this.qualitySettings.shadows;
+      this.dirLight.shadow.mapSize.width = this.qualitySettings.shadowMapSize;
+      this.dirLight.shadow.mapSize.height = this.qualitySettings.shadowMapSize;
       this.dirLight.shadow.camera.near = 0.5;
       this.dirLight.shadow.camera.far = 300;
       const d = 60;
@@ -235,6 +247,7 @@ export class FootGolfRenderer {
       this.dirLight.shadow.normalBias = 0.02;
     }
     this.scene.add(this.dirLight);
+    this.scene.add(this.dirLight.target);
 
     // 5b. Atmospheric Sun Disc & Glowing Corona Halo
     this.sunGroup = new THREE.Group();
@@ -275,7 +288,7 @@ export class FootGolfRenderer {
 
     // Procedural Textures
     this.ballTexture = this.createSoccerBallTexture('#ffffff', '#1e293b');
-    this.grassTexture = this.createGrassTexture();
+    this.grassTexture = this.createGrassDetailTexture();
     this.grassBumpTexture = this.createGrassBumpTexture();
     this.flagTexture = this.createFlagTexture(hole.number);
 
@@ -682,11 +695,15 @@ export class FootGolfRenderer {
     }
 
     this.activeCourse = course;
+    // Bake the sky on the first frame: a bake during construction can come out empty
+    this.pendingAtmosphere = course;
+    this.setPostProcessing(this.qualitySettings.postProcessing);
 
 
     // Build course terrain and props
     this.buildTerrain(course, hole);
     this.buildProps(hole);
+    this.buildGrassTufts(hole);
 
     // Position cup
     this.cupGroup.position.set(hole.pinPosition.x, hole.pinPosition.y, hole.pinPosition.z);
@@ -710,8 +727,11 @@ export class FootGolfRenderer {
     const w = this.container.clientWidth || window.innerWidth;
     const h = this.container.clientHeight || window.innerHeight;
     this.camera.aspect = w / h;
+    // Widen the vertical field of view on portrait screens to keep enough of the hole in view
+    this.camera.fov = this.camera.aspect < 0.9 ? 64 : 52;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(w, h);
+    this.composer?.setSize(w, h);
   };
 
   /**
@@ -818,39 +838,28 @@ export class FootGolfRenderer {
   /**
    * Procedural Grass canvas color texture with rich lush turf blades and moisture variation
    */
-  private createGrassTexture(): THREE.CanvasTexture {
+  /**
+   * Neutral-gray grass detail (mean ~50% gray) used as a multiplier over the baked surface.
+   */
+  private createGrassDetailTexture(): THREE.CanvasTexture {
+    const size = 256;
     const canvas = document.createElement('canvas');
-    canvas.width = 1024;
-    canvas.height = 1024;
+    canvas.width = size;
+    canvas.height = size;
     const ctx = canvas.getContext('2d')!;
-
-    // Base deep championship fairway green gradient
-    const grad = ctx.createLinearGradient(0, 0, 1024, 1024);
-    grad.addColorStop(0, '#266c2e');
-    grad.addColorStop(0.5, '#2e7d32');
-    grad.addColorStop(1, '#205724');
-    ctx.fillStyle = grad;
-    ctx.fillRect(0, 0, 1024, 1024);
-
-    // Multi-shade organic grass blade texture
-    const bladeColors = ['#4caf50', '#1b5e20', '#388e3c', '#81c784', '#144618', '#66bb6a'];
-    for (let i = 0; i < 16000; i++) {
-      const x = Math.random() * 1024;
-      const y = Math.random() * 1024;
-      const shade = bladeColors[Math.floor(Math.random() * bladeColors.length)];
-      ctx.fillStyle = shade;
-      ctx.globalAlpha = 0.42;
-      const bladeLen = Math.random() * 6 + 2;
-      ctx.fillRect(x, y, 2, bladeLen);
+    ctx.fillStyle = 'rgb(128,128,128)';
+    ctx.fillRect(0, 0, size, size);
+    for (let i = 0; i < 5000; i++) {
+      const v = Math.floor(96 + Math.random() * 64);
+      ctx.fillStyle = `rgb(${v},${v},${v})`;
+      ctx.globalAlpha = 0.5;
+      ctx.fillRect(Math.random() * size, Math.random() * size, 1.5, 2 + Math.random() * 5);
     }
     ctx.globalAlpha = 1.0;
-
     const tex = new THREE.CanvasTexture(canvas);
-    tex.colorSpace = THREE.SRGBColorSpace;
     tex.wrapS = THREE.RepeatWrapping;
     tex.wrapT = THREE.RepeatWrapping;
-    tex.repeat.set(28, 28);
-    tex.anisotropy = this.renderer.capabilities.getMaxAnisotropy();
+    tex.anisotropy = Math.min(8, this.renderer.capabilities.getMaxAnisotropy());
     return tex;
   }
 
@@ -1033,6 +1042,7 @@ export class FootGolfRenderer {
     const colTee = new THREE.Color('#388e3c');
 
     const tempCol = new THREE.Color();
+    const palette = { colRough, colFairway, colGreen, colSand, colWater, colTee };
 
     for (let i = 0; i < posAttr.count; i++) {
       const x = posAttr.getX(i);
@@ -1040,82 +1050,7 @@ export class FootGolfRenderer {
       posAttr.setZ(i, z);
 
       const h = getTerrainHeight(hole, x, z);
-      posAttr.setY(i, h);
-
-      // Determine vertex color based on terrain feature
-      tempCol.copy(colRough);
-
-      // Fairways with championship cross-cut diamond mower striping
-      for (const fw of hole.fairways) {
-        const dx = (x - fw.x) / fw.rx;
-        const dz = (z - fw.z) / fw.rz;
-        const dSq = dx * dx + dz * dz;
-        if (dSq <= 1.0) {
-          const blend = Math.max(0, 1 - dSq);
-          // Two-axis diagonal diamond mowing pattern
-          const s1 = Math.sin((x * 0.707 + z * 0.707) * 0.65);
-          const s2 = Math.sin((-x * 0.707 + z * 0.707) * 0.65);
-          const stripe = (s1 * s2 > 0 ? 0.045 : -0.045);
-          const stripedFairway = colFairway.clone();
-          stripedFairway.r = Math.max(0, Math.min(1, stripedFairway.r + stripe * 0.5));
-          stripedFairway.g = Math.max(0, Math.min(1, stripedFairway.g + stripe));
-          stripedFairway.b = Math.max(0, Math.min(1, stripedFairway.b + stripe * 0.35));
-          tempCol.lerp(stripedFairway, blend);
-        }
-      }
-
-      // Greens & Manicured Collar / Fringe
-      for (const gr of hole.greens) {
-        const dist = Math.sqrt((x - gr.x) ** 2 + (z - gr.z) ** 2);
-        if (dist <= gr.radius) {
-          const blend = Math.max(0, 1 - (dist / gr.radius) ** 2);
-          tempCol.lerp(colGreen, blend * 0.96);
-        } else if (dist <= gr.radius + 1.8) {
-          // Manicured Green Apron / Collar
-          const collarBlend = 1 - (dist - gr.radius) / 1.8;
-          const colCollar = new THREE.Color('#1e4e26');
-          tempCol.lerp(colCollar, collarBlend * 0.75);
-        }
-      }
-
-      // Bunkers with sculpted raised turf lips and depressed sand basin
-      for (const bk of hole.bunkers) {
-        const dx = (x - bk.x) / bk.rx;
-        const dz = (z - bk.z) / bk.rz;
-        const dSq = dx * dx + dz * dz;
-        if (dSq <= 1.25) {
-          if (dSq <= 0.82) {
-            // Sand basin with raked ripples
-            const sandRake = Math.sin((x + z * 0.5) * 5.0) * 0.025;
-            const rakedSand = colSand.clone();
-            rakedSand.r += sandRake;
-            rakedSand.g += sandRake * 0.9;
-            tempCol.lerp(rakedSand, 0.95);
-            posAttr.setY(i, h - 0.38);
-          } else {
-            // Sculpted bunker turf lip
-            const lipFactor = Math.sin(((Math.sqrt(dSq) - 0.82) / 0.43) * Math.PI);
-            posAttr.setY(i, h + 0.22 * lipFactor);
-            tempCol.lerp(new THREE.Color('#274e13'), lipFactor * 0.45);
-          }
-        }
-      }
-
-      // Water hazard depression
-      for (const wt of hole.waters) {
-        const dx = (x - wt.x) / wt.rx;
-        const dz = (z - wt.z) / wt.rz;
-        if (dx * dx + dz * dz <= 1.0) {
-          tempCol.lerp(colWater, 0.95);
-          posAttr.setY(i, Math.min(h, -0.45));
-        }
-      }
-
-      // Tee Box
-      const toTee = Math.sqrt((x - hole.teePosition.x) ** 2 + (z - hole.teePosition.z) ** 2);
-      if (toTee < 4.0) {
-        tempCol.lerp(colTee, 0.9);
-      }
+      posAttr.setY(i, this.sampleSurface(hole, palette, x, z, h, tempCol));
 
       colorAttr[i * 3] = tempCol.r;
       colorAttr[i * 3 + 1] = tempCol.g;
@@ -1125,13 +1060,25 @@ export class FootGolfRenderer {
     geom.setAttribute('color', new THREE.BufferAttribute(colorAttr, 3));
     geom.computeVertexNormals();
 
+    // Planar UVs across the whole terrain for the baked surface map
+    const zMin = hole.pinPosition.z * 0.45 - sizeZ / 2;
+    const uvAttr = geom.attributes.uv as THREE.BufferAttribute;
+    for (let i = 0; i < posAttr.count; i++) {
+      uvAttr.setXY(i, (posAttr.getX(i) + sizeX / 2) / sizeX, 1 - (posAttr.getZ(i) - zMin) / sizeZ);
+    }
+    uvAttr.needsUpdate = true;
+
+    this.surfaceTexture?.dispose();
+    this.surfaceTexture = this.bakeSurfaceTexture(hole, palette, sizeX, sizeZ, zMin);
+
     const mat = new THREE.MeshStandardMaterial({
-      vertexColors: true,
-      roughness: 0.82,
-      metalness: 0.04,
+      map: this.surfaceTexture,
+      roughness: 0.86,
+      metalness: 0.0,
       bumpMap: this.grassBumpTexture,
       bumpScale: 0.05,
     });
+    this.applyTerrainDetail(mat);
 
     this.terrainMesh = new THREE.Mesh(geom, mat);
     this.terrainMesh.receiveShadow = !this.isSoftwareGl;
@@ -1150,12 +1097,16 @@ export class FootGolfRenderer {
       const waterGeom = new THREE.CircleGeometry(maxR, 36);
       waterGeom.rotateX(-Math.PI / 2);
       waterGeom.scale(wt.rx / maxR, 1, wt.rz / maxR);
+      const waterNormals = this.getWaterNormalTexture();
       const waterMat = new THREE.MeshStandardMaterial({
-        color: course.theme === 'japanese_garden' ? 0x0369a1 : 0x0284c7,
-        roughness: 0.06,
-        metalness: 0.35,
+        color: course.theme === 'japanese_garden' ? 0x0b5f8a : 0x0a6fa8,
+        roughness: 0.08,
+        metalness: 0.1,
+        normalMap: waterNormals,
+        normalScale: new THREE.Vector2(0.35, 0.35),
+        envMapIntensity: 2.2,
         transparent: true,
-        opacity: 0.90,
+        opacity: 0.92,
       });
       const waterMesh = new THREE.Mesh(waterGeom, waterMat);
       waterMesh.position.set(wt.x, -0.15, wt.z);
@@ -1177,18 +1128,330 @@ export class FootGolfRenderer {
     }
   }
 
+  private surfaceTexture: THREE.CanvasTexture | null = null;
+
+  /**
+   * Bakes the course surface (fairway stripes, greens, bunkers, water, tee) into a texture
+   * at a resolution set by the quality tier. Texels are about 0.3-1 m, so feature edges stay
+   * sharp instead of blending across ~5 m terrain triangles.
+   */
+  private bakeSurfaceTexture(
+    hole: HoleData,
+    palette: Parameters<FootGolfRenderer['sampleSurface']>[1],
+    sizeX: number,
+    sizeZ: number,
+    zMin: number
+  ): THREE.CanvasTexture {
+    const width = this.qualitySettings.tier === 'high' ? 768 : this.qualitySettings.tier === 'medium' ? 512 : 256;
+    const height = Math.round((width * sizeZ) / sizeX);
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d')!;
+    const image = ctx.createImageData(width, height);
+    const data = image.data;
+    const c = new THREE.Color();
+
+    for (let row = 0; row < height; row++) {
+      const z = zMin + ((row + 0.5) / height) * sizeZ;
+      for (let col = 0; col < width; col++) {
+        const x = -sizeX / 2 + ((col + 0.5) / width) * sizeX;
+        this.sampleSurface(hole, palette, x, z, 0, c);
+        c.convertLinearToSRGB();
+        const o = (row * width + col) * 4;
+        data[o] = Math.max(0, Math.min(255, c.r * 255));
+        data[o + 1] = Math.max(0, Math.min(255, c.g * 255));
+        data[o + 2] = Math.max(0, Math.min(255, c.b * 255));
+        data[o + 3] = 255;
+      }
+    }
+    ctx.putImageData(image, 0, 0);
+
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.anisotropy = Math.min(8, this.renderer.capabilities.getMaxAnisotropy());
+    return tex;
+  }
+
+  /**
+   * Multiplies a tiling, neutral-gray grass detail texture over the terrain's base color,
+   * so close-up ground shows blades and variation without a large unique texture.
+   */
+  private applyTerrainDetail(mat: THREE.MeshStandardMaterial) {
+    const detail = this.grassTexture;
+    mat.onBeforeCompile = (shader) => {
+      shader.uniforms.detailMap = { value: detail };
+      shader.uniforms.detailRepeat = { value: new THREE.Vector2(130, 210) };
+      shader.fragmentShader = shader.fragmentShader
+        .replace(
+          '#include <common>',
+          '#include <common>\nuniform sampler2D detailMap;\nuniform vec2 detailRepeat;'
+        )
+        .replace(
+          '#include <map_fragment>',
+          `#include <map_fragment>
+          float detailLum = texture2D(detailMap, vMapUv * detailRepeat).r;
+          diffuseColor.rgb *= mix(1.0, detailLum * 2.0, 0.55);`
+        );
+    };
+    mat.customProgramCacheKey = () => 'terrain-detail-v1';
+  }
+
+  private waterNormalTexture: THREE.CanvasTexture | null = null;
+
+  /**
+   * Tiling ripple normal map built from layered sine waves. Scrolled every frame so
+   * water reflects the sky with moving ripples at the cost of one texture.
+   */
+  private getWaterNormalTexture(): THREE.CanvasTexture {
+    if (this.waterNormalTexture) return this.waterNormalTexture;
+    const size = 128;
+    const heights = new Float32Array(size * size);
+    const tau = Math.PI * 2;
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const u = x / size;
+        const v = y / size;
+        heights[y * size + x] =
+          Math.sin(tau * (u * 3 + v * 2)) * 0.5 +
+          Math.sin(tau * (u * -5 + v * 4) + 1.3) * 0.3 +
+          Math.sin(tau * (u * 7 - v * 9) + 2.1) * 0.2;
+      }
+    }
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d')!;
+    const img = ctx.createImageData(size, size);
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const hL = heights[y * size + ((x - 1 + size) % size)];
+        const hR = heights[y * size + ((x + 1) % size)];
+        const hD = heights[((y - 1 + size) % size) * size + x];
+        const hU = heights[((y + 1) % size) * size + x];
+        const nx = (hL - hR) * 2.0;
+        const ny = (hD - hU) * 2.0;
+        const len = Math.hypot(nx, ny, 1);
+        const o = (y * size + x) * 4;
+        img.data[o] = ((nx / len) * 0.5 + 0.5) * 255;
+        img.data[o + 1] = ((ny / len) * 0.5 + 0.5) * 255;
+        img.data[o + 2] = ((1 / len) * 0.5 + 0.5) * 255;
+        img.data[o + 3] = 255;
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.wrapS = THREE.RepeatWrapping;
+    tex.wrapT = THREE.RepeatWrapping;
+    tex.repeat.set(6, 6);
+    this.waterNormalTexture = tex;
+    return tex;
+  }
+
+  private grassTufts: THREE.InstancedMesh | null = null;
+  private grassUniforms = { uTime: { value: 0 }, uWind: { value: new THREE.Vector2(0.4, 0.2) } };
+
+  /**
+   * Scatters instanced grass tufts across the rough along the hole corridor (medium and
+   * high tiers). Each tuft is three crossed blades; all tufts are one draw call, and a
+   * vertex shader sways blade tips with the wind.
+   */
+  private buildGrassTufts(hole: HoleData) {
+    if (this.grassTufts) {
+      this.scene.remove(this.grassTufts);
+      this.grassTufts.geometry.dispose();
+      (this.grassTufts.material as THREE.Material).dispose();
+      this.grassTufts = null;
+    }
+    const tier = this.qualitySettings.tier;
+    if (tier === 'low') return;
+    const target = tier === 'high' ? 3500 : 1600;
+
+    // Three blades, each a thin triangle, rotated around the tuft center
+    const positions: number[] = [];
+    const heights: number[] = [];
+    for (let b = 0; b < 3; b++) {
+      const a = (b / 3) * Math.PI;
+      const cx = Math.cos(a);
+      const cz = Math.sin(a);
+      const w = 0.055;
+      positions.push(-cx * w, 0, -cz * w, cx * w, 0, cz * w, cx * 0.02, 0.24, cz * 0.02);
+      heights.push(0, 0, 1);
+    }
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geom.setAttribute('bladeHeight', new THREE.Float32BufferAttribute(heights, 1));
+    geom.computeVertexNormals();
+
+    const mat = new THREE.MeshStandardMaterial({
+      color: this.activeCourse?.theme === 'desert' ? 0x6b7a35 : 0x356b2c,
+      roughness: 0.9,
+      side: THREE.DoubleSide,
+    });
+    const uniforms = this.grassUniforms;
+    mat.onBeforeCompile = (shader) => {
+      shader.uniforms.uTime = uniforms.uTime;
+      shader.uniforms.uWind = uniforms.uWind;
+      shader.vertexShader = shader.vertexShader
+        .replace('#include <common>', '#include <common>\nattribute float bladeHeight;\nuniform float uTime;\nuniform vec2 uWind;')
+        .replace(
+          '#include <begin_vertex>',
+          `#include <begin_vertex>
+          vec4 tuftOrigin = instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0);
+          float sway = sin(uTime * 2.2 + tuftOrigin.x * 0.35 + tuftOrigin.z * 0.27) * 0.5 + 0.5;
+          transformed.xz += uWind * bladeHeight * bladeHeight * (0.35 + sway * 0.65) * 0.12;`
+        );
+    };
+    mat.customProgramCacheKey = () => 'grass-tufts-v1';
+
+    const mesh = new THREE.InstancedMesh(geom, mat, target);
+    const m = new THREE.Matrix4();
+    const q = new THREE.Quaternion();
+    const scale = new THREE.Vector3();
+    const posV = new THREE.Vector3();
+    const up = new THREE.Vector3(0, 1, 0);
+    const tee = hole.teePosition;
+    const pin = hole.pinPosition;
+    const len = Math.hypot(pin.x - tee.x, pin.z - tee.z) || 1;
+    let placed = 0;
+    let seed = hole.number * 9301 + 49297;
+    const rand = () => {
+      seed = (seed * 9301 + 49297) % 233280;
+      return seed / 233280;
+    };
+    for (let attempt = 0; attempt < target * 6 && placed < target; attempt++) {
+      // Sample along the tee-to-pin corridor, up to 45 m either side
+      const t = rand() * 1.15 - 0.05;
+      const side = (rand() - 0.5) * 90;
+      const x = tee.x + ((pin.x - tee.x) * t) + (-(pin.z - tee.z) / len) * side;
+      const z = tee.z + ((pin.z - tee.z) * t) + ((pin.x - tee.x) / len) * side;
+      if (getSurfaceLie(hole, x, z) !== 'rough') continue;
+      posV.set(x, getTerrainHeight(hole, x, z) - 0.02, z);
+      q.setFromAxisAngle(up, rand() * Math.PI * 2);
+      const sz = 0.7 + rand() * 0.8;
+      scale.set(sz, sz * (0.8 + rand() * 0.6), sz);
+      m.compose(posV, q, scale);
+      mesh.setMatrixAt(placed++, m);
+    }
+    mesh.count = placed;
+    mesh.instanceMatrix.needsUpdate = true;
+    mesh.computeBoundingSphere();
+    mesh.receiveShadow = true;
+    this.grassTufts = mesh;
+    this.scene.add(mesh);
+  }
+
+  /**
+   * Surface color and rendered height at a point. Shared by terrain vertices and the
+   * baked surface texture so both agree with the physics boundaries in getSurfaceLie.
+   */
+  private static readonly COLLAR_COLOR = new THREE.Color('#1e4e26');
+  private static readonly BUNKER_LIP_COLOR = new THREE.Color('#274e13');
+  private _surfScratchA = new THREE.Color();
+  private _surfScratchB = new THREE.Color();
+
+  private sampleSurface(
+    hole: HoleData,
+    palette: { colRough: THREE.Color; colFairway: THREE.Color; colGreen: THREE.Color; colSand: THREE.Color; colWater: THREE.Color; colTee: THREE.Color },
+    x: number,
+    z: number,
+    h: number,
+    out: THREE.Color
+  ): number {
+    const { colRough, colFairway, colGreen, colSand, colWater, colTee } = palette;
+    let y = h;
+    // Determine vertex color based on terrain feature
+    out.copy(colRough);
+
+    // Fairways with championship cross-cut diamond mower striping
+    for (const fw of hole.fairways) {
+      const dx = (x - fw.x) / fw.rx;
+      const dz = (z - fw.z) / fw.rz;
+      const dSq = dx * dx + dz * dz;
+      if (dSq <= 1.0) {
+        // Crisp ~1.2 m mown edge that matches the physics boundary
+        const edgeMeters = (1 - Math.sqrt(dSq)) * Math.min(fw.rx, fw.rz);
+        const blend = Math.min(1, edgeMeters / 1.2);
+        // Two-axis diagonal diamond mowing pattern
+        const s1 = Math.sin((x * 0.707 + z * 0.707) * 0.65);
+        const s2 = Math.sin((-x * 0.707 + z * 0.707) * 0.65);
+        const stripe = (s1 * s2 > 0 ? 0.045 : -0.045);
+        const stripedFairway = this._surfScratchA.copy(colFairway);
+        stripedFairway.r = Math.max(0, Math.min(1, stripedFairway.r + stripe * 0.5));
+        stripedFairway.g = Math.max(0, Math.min(1, stripedFairway.g + stripe));
+        stripedFairway.b = Math.max(0, Math.min(1, stripedFairway.b + stripe * 0.35));
+        out.lerp(stripedFairway, blend);
+      }
+    }
+
+    // Greens & Manicured Collar / Fringe
+    for (const gr of hole.greens) {
+      const dist = Math.sqrt((x - gr.x) ** 2 + (z - gr.z) ** 2);
+      if (dist <= gr.radius) {
+        const blend = Math.min(1, (gr.radius - dist) / 0.6);
+        out.lerp(colGreen, blend * 0.96);
+      } else if (dist <= gr.radius + 1.8) {
+        // Manicured Green Apron / Collar
+        const collarBlend = 1 - (dist - gr.radius) / 1.8;
+        const colCollar = FootGolfRenderer.COLLAR_COLOR;
+        out.lerp(colCollar, collarBlend * 0.75);
+      }
+    }
+
+    // Bunkers with sculpted raised turf lips and depressed sand basin
+    for (const bk of hole.bunkers) {
+      const dx = (x - bk.x) / bk.rx;
+      const dz = (z - bk.z) / bk.rz;
+      const dSq = dx * dx + dz * dz;
+      if (dSq <= 1.35) {
+        if (dSq <= 1.0) {
+          // Sand basin with raked ripples
+          const sandRake = Math.sin((x + z * 0.5) * 5.0) * 0.025;
+          const rakedSand = this._surfScratchB.copy(colSand);
+          rakedSand.r += sandRake;
+          rakedSand.g += sandRake * 0.9;
+          out.lerp(rakedSand, 0.95);
+          y = (h - 0.38);
+        } else {
+          // Sculpted bunker turf lip
+          const lipFactor = Math.sin(((Math.sqrt(dSq) - 1.0) / (Math.sqrt(1.35) - 1.0)) * Math.PI);
+          y = (h + 0.22 * lipFactor);
+          out.lerp(FootGolfRenderer.BUNKER_LIP_COLOR, lipFactor * 0.45);
+        }
+      }
+    }
+
+    // Water hazard depression
+    for (const wt of hole.waters) {
+      const dx = (x - wt.x) / wt.rx;
+      const dz = (z - wt.z) / wt.rz;
+      const d = Math.sqrt(dx * dx + dz * dz);
+      if (d <= 1.0) {
+        out.lerp(colWater, 0.95);
+      }
+      // Smooth bank so the water plane meets the ground along a clean curve
+      if (d <= 1.35) {
+        const t = Math.min(1, Math.max(0, (1.35 - d) / 0.45));
+        const bank = t * t * (3 - 2 * t);
+        y = Math.min(y, h + (-0.45 - h) * bank);
+      }
+    }
+
+    // Tee Box
+    const toTee = Math.sqrt((x - hole.teePosition.x) ** 2 + (z - hole.teePosition.z) ** 2);
+    if (toTee < 3.0) {
+      out.lerp(colTee, 0.9);
+    }
+
+    return y;
+  }
+
   /**
    * Builds 3-12 part procedural trees, boulders, tee markers, and yardage posts
    */
   private buildProps(hole: HoleData) {
-    // Clear old props
-    while (this.propGroup.children.length > 0) {
-      const child = this.propGroup.children[0];
-      this.propGroup.remove(child);
-      if ((child as THREE.Mesh).geometry) {
-        (child as THREE.Mesh).geometry.dispose();
-      }
-    }
+    // Clear old props (including nested geometries and materials)
+    disposeChildren(this.propGroup);
 
     // 1. Multi-part Trees (Pine or Palm)
     for (const tree of hole.trees) {
@@ -1575,6 +1838,24 @@ export class FootGolfRenderer {
         this.propGroup.add(bench);
       }
     }
+
+    // Merge static, untextured prop meshes into one draw call per material
+    this.lastPropBatch = batchStaticMeshes(this.propGroup);
+  }
+
+  private lastPropBatch: BatchResult = { meshesBefore: 0, meshesAfter: 0 };
+
+  /** Draw-call diagnostics for the performance overlay and tests. */
+  public getRenderStats() {
+    const info = this.renderer.info;
+    return {
+      drawCalls: info.render.calls,
+      triangles: info.render.triangles,
+      geometries: info.memory.geometries,
+      textures: info.memory.textures,
+      propMeshesBefore: this.lastPropBatch.meshesBefore,
+      propMeshesAfter: this.lastPropBatch.meshesAfter,
+    };
   }
 
   /**
@@ -1590,7 +1871,10 @@ export class FootGolfRenderer {
   /**
    * Set aerodynamic flight state
    */
+  private flightHeadingRad: number | null = null;
+
   public setBallInFlight(inFlight: boolean) {
+    if (inFlight !== this.isBallInFlight) this.flightHeadingRad = null;
     this.isBallInFlight = inFlight;
     if (!inFlight) {
       this.flightTrailPositions = [];
@@ -1649,7 +1933,24 @@ export class FootGolfRenderer {
 
       const shadowMat = this.ballShadow.material as THREE.MeshBasicMaterial;
       shadowMat.opacity = Math.max(0, 0.45 - heightAbove * 0.045);
+      // Real shadow maps already draw the ball's shadow; keep the blob only without them
+      this.ballShadow.visible = !this.renderer.shadowMap.enabled;
       this.ballShadow.position.y = -BALL_RADIUS - heightAbove + 0.012;
+    }
+
+    // Track a smoothed horizontal heading for the flight camera
+    if (vel && this.isBallInFlight) {
+      const hs = Math.hypot(vel.x, vel.z);
+      if (hs > 1.5) {
+        const target = Math.atan2(vel.x, vel.z);
+        if (this.flightHeadingRad === null) {
+          this.flightHeadingRad = target;
+        } else {
+          let delta = target - this.flightHeadingRad;
+          delta = Math.atan2(Math.sin(delta), Math.cos(delta));
+          this.flightHeadingRad += delta * 0.04;
+        }
+      }
     }
 
     // Realistic roll rotation along movement direction
@@ -2124,6 +2425,45 @@ export class FootGolfRenderer {
     }
   }
 
+  private static readonly IMPACT_PALETTES: Record<string, number[]> = {
+    sand: [0xe8d3a0, 0xd9bf85, 0xf3e3bb, 0xc9ad72],
+    rough: [0x2f6b2a, 0x3d7f33, 0x5a8f3c, 0x24521f],
+    fairway: [0x4caf50, 0x66bb6a, 0x388e3c, 0x81c784],
+    green: [0x66bb6a, 0x81c784, 0x4caf50],
+    tee: [0x4caf50, 0x66bb6a, 0x388e3c],
+  };
+
+  /**
+   * Landing and kick effects that depend on the surface: a fan of sand from bunkers,
+   * clippings from rough and fairway, and a light puff of grass on greens. Count and
+   * spread scale with impact speed.
+   */
+  public emitSurfaceImpact(pos: Vector3D, surface: string, impactSpeed: number) {
+    if (surface === 'water') {
+      this.emitWaterSplash(pos, Math.round(10 + impactSpeed * 2));
+      return;
+    }
+    const palette = FootGolfRenderer.IMPACT_PALETTES[surface] ?? FootGolfRenderer.IMPACT_PALETTES.fairway;
+    const strength = Math.min(1, impactSpeed / 14);
+    const isSand = surface === 'sand';
+    const count = Math.round((isSand ? 14 : surface === 'green' ? 3 : 6) + strength * (isSand ? 26 : 12));
+    const spread = (isSand ? 3.2 : 2.2) * (0.5 + strength);
+    const lift = (isSand ? 4.2 : 2.6) * (0.6 + strength);
+    for (let i = 0; i < count; i++) {
+      if (this.particles.length >= this.maxParticles) this.particles.shift();
+      const angle = Math.random() * Math.PI * 2;
+      const r = Math.random();
+      this.particles.push({
+        pos: new THREE.Vector3(pos.x + Math.cos(angle) * 0.1, pos.y - 0.05, pos.z + Math.sin(angle) * 0.1),
+        vel: new THREE.Vector3(Math.cos(angle) * spread * r, lift * (0.5 + Math.random() * 0.8), Math.sin(angle) * spread * r),
+        life: 0,
+        maxLife: (isSand ? 0.55 : 0.45) + Math.random() * 0.35,
+        color: new THREE.Color(palette[Math.floor(Math.random() * palette.length)]),
+        size: (isSand ? 0.09 : 0.12) + Math.random() * 0.1,
+      });
+    }
+  }
+
   /**
    * Multi-color victory confetti burst on holed shot
    */
@@ -2267,16 +2607,18 @@ export class FootGolfRenderer {
       // Dynamic broadcast follow camera with forward lead and terrain collision avoidance
       const followDist = 6.2;
       const followHeight = 3.2;
-      const camX = this.ballGroup.position.x - Math.sin(this.aimAngleRad) * followDist;
-      const camZ = this.ballGroup.position.z - Math.cos(this.aimAngleRad) * followDist;
+      // Follow the ball's actual heading so hooks and slices stay in frame
+      const heading = this.flightHeadingRad ?? this.aimAngleRad;
+      const camX = this.ballGroup.position.x - Math.sin(heading) * followDist;
+      const camZ = this.ballGroup.position.z - Math.cos(heading) * followDist;
       const groundAtCam = getTerrainHeight(hole, camX, camZ);
       const camY = Math.max(this.ballGroup.position.y + followHeight, groundAtCam + 2.4);
 
       this.targetCamPos.set(camX, camY, camZ);
       this.targetLookAt.set(
-        this.ballGroup.position.x + Math.sin(this.aimAngleRad) * 14,
+        this.ballGroup.position.x + Math.sin(heading) * 14,
         this.ballGroup.position.y * 0.7 + 0.5,
-        this.ballGroup.position.z + Math.cos(this.aimAngleRad) * 14
+        this.ballGroup.position.z + Math.cos(heading) * 14
       );
     } else if (this.cameraMode === 'green') {
       // Zoomed on Green & Pin
@@ -2297,10 +2639,14 @@ export class FootGolfRenderer {
     } else {
       // Aim Mode elevated so ball sits cleanly in lower-third (~65% down viewport), completely clear of bottom controls
       const isPutt = this.currentKickType === 'putt';
-      const backDist = isPutt ? 4.2 : 5.2;
-      const height = isPutt ? 1.5 : 1.7;
-      const lookDist = isPutt ? 14 : 18;
-      const lookY = isPutt ? this.ballGroup.position.y - 1.8 : this.ballGroup.position.y - 2.2;
+      // Portrait screens: raise and pull back so the player doesn't block the fairway
+      const portrait = this.camera.aspect < 0.9;
+      const backDist = isPutt ? (portrait ? 5.0 : 4.2) : portrait ? 6.4 : 5.2;
+      const height = isPutt ? (portrait ? 2.6 : 1.5) : portrait ? 3.6 : 1.7;
+      const lookDist = isPutt ? 14 : portrait ? 26 : 18;
+      const lookY = isPutt
+        ? this.ballGroup.position.y - (portrait ? 0.8 : 1.8)
+        : this.ballGroup.position.y - (portrait ? 0.6 : 2.2);
 
       this.targetCamPos.set(
         this.ballGroup.position.x - Math.sin(this.aimAngleRad) * backDist,
@@ -2337,15 +2683,213 @@ export class FootGolfRenderer {
    * Triggers physical tactile camera impact trauma
    */
   public triggerCameraImpact(intensity: number = 0.28) {
+    if (getActiveSettings().reducedMotion) return;
     this.cameraImpactTrauma = Math.min(1.0, this.cameraImpactTrauma + intensity);
   }
 
+  private envTarget: THREE.WebGLRenderTarget | null = null;
+  private pendingAtmosphere: CourseData | null = null;
+  private atmosphere: AtmosphereSettings = getAtmosphere({ theme: 'parkland' });
+  private sunDir = new THREE.Vector3(0.4, 0.8, 0.4).normalize();
+
   /**
-   * Real-time Dynamic Resolution Scaling (DRS) controller
+   * Bakes a physically based sky for the course into a prefiltered environment map,
+   * used both as the visible background and as image-based lighting, and aligns the
+   * sun light, sun disc, fog, and exposure with it.
+   */
+  private applyAtmosphere(course: CourseData) {
+    const atm = getAtmosphere(course);
+    this.atmosphere = atm;
+    const dir = sunDirection(atm);
+    this.sunDir.set(dir.x, dir.y, dir.z);
+
+    try {
+      const sky = new Sky();
+      sky.scale.setScalar(50);
+      const u = sky.material.uniforms;
+      u.turbidity.value = atm.turbidity;
+      u.rayleigh.value = atm.rayleigh;
+      u.mieCoefficient.value = atm.mieCoefficient;
+      u.mieDirectionalG.value = atm.mieDirectionalG;
+      u.sunPosition.value.copy(this.sunDir);
+      const skyScene = new THREE.Scene();
+      skyScene.add(sky);
+      const pmrem = new THREE.PMREMGenerator(this.renderer);
+      const target = pmrem.fromScene(skyScene, 0, 0.1, 100);
+      pmrem.dispose();
+      sky.geometry.dispose();
+      sky.material.dispose();
+      this.envTarget?.dispose();
+      this.envTarget = target;
+      this.scene.background = target.texture;
+      this.scene.environment = target.texture;
+      this.scene.environmentIntensity = atm.envIntensity;
+      this.scene.backgroundIntensity = atm.backgroundIntensity;
+    } catch {
+      // Fall back to a flat sky color if the sky can't be baked
+      this.scene.background = new THREE.Color(course.skyColor);
+      this.scene.environment = null;
+    }
+
+    this.dirLight.color.set(atm.sunColor);
+    this.dirLight.intensity = atm.sunIntensity;
+    this.hemiLight.intensity = atm.hemiIntensity;
+    this.renderer.toneMappingExposure = atm.exposure;
+    this.scene.fog = new THREE.FogExp2(course.fogColor, atm.fogDensity);
+
+    if (this.sunGroup) {
+      this.sunGroup.position.copy(this.sunDir).multiplyScalar(360);
+      this.sunGroup.lookAt(0, 0, 0);
+    }
+    this.updateShadowFrustum(true);
+  }
+
+  private shadowCenter = new THREE.Vector3();
+
+  /**
+   * Keeps a tight shadow frustum centered on the ball (and so on the player), snapped to
+   * whole shadow-map texels so shadow edges don't shimmer as the camera moves.
+   */
+  private updateShadowFrustum(force = false) {
+    if (!this.dirLight.castShadow && !force) return;
+    const halfSize = this.qualitySettings.tier === 'high' ? 45 : 35;
+    const cam = this.dirLight.shadow.camera;
+    if (cam.right !== halfSize) {
+      cam.left = -halfSize;
+      cam.right = halfSize;
+      cam.top = halfSize;
+      cam.bottom = -halfSize;
+      cam.near = 1;
+      cam.far = 400;
+      cam.updateProjectionMatrix();
+    }
+    const texel = (halfSize * 2) / this.dirLight.shadow.mapSize.x;
+    const p = this.ballGroup.position;
+    this.shadowCenter.set(Math.round(p.x / texel) * texel, Math.round(p.y / texel) * texel, Math.round(p.z / texel) * texel);
+    this.dirLight.target.position.copy(this.shadowCenter);
+    this.dirLight.position.copy(this.sunDir).multiplyScalar(150).add(this.shadowCenter);
+  }
+
+  /**
+   * Dynamic resolution scaling: lowers the render pixel ratio when frames miss budget.
    */
   public setDynamicResolutionScale(scale: number) {
-    // Keep scale tracker without thrashing WebGL buffer allocation during flight
-    this.currentDrsScale = Math.max(0.68, Math.min(1.0, scale));
+    const clamped = Math.max(FrameTimeMonitor.MIN_SCALE, Math.min(1.0, scale));
+    if (Math.abs(clamped - this.currentDrsScale) < 0.01) return;
+    this.currentDrsScale = clamped;
+    this.renderer.setPixelRatio(computePixelRatio(this.qualitySettings, window.devicePixelRatio, clamped));
+    this.onResize();
+  }
+
+  private qualitySettings: QualitySettings;
+  private frameMonitor: FrameTimeMonitor;
+  private qualityListener: ((tier: QualityTier) => void) | null = null;
+
+  public getQualityTier(): QualityTier {
+    return this.qualitySettings.tier;
+  }
+
+  public onQualityChange(listener: ((tier: QualityTier) => void) | null) {
+    this.qualityListener = listener;
+  }
+
+  /** Applies a quality preset at runtime: pixel ratio, shadows, and post-processing. */
+  public setQualityPreference(pref: QualityPreference) {
+    const tier = resolveInitialTier(pref, this.isSoftwareGl);
+    this.frameMonitor = new FrameTimeMonitor(QUALITY_PRESETS[tier], pref === 'auto' && !this.isSoftwareGl);
+    this.applyQuality(QUALITY_PRESETS[tier]);
+  }
+
+  private applyQuality(settings: QualitySettings) {
+    const shadowsChanged = settings.shadows !== this.qualitySettings.shadows ||
+      settings.softShadows !== this.qualitySettings.softShadows;
+    const mapChanged = settings.shadowMapSize !== this.qualitySettings.shadowMapSize;
+    this.qualitySettings = settings;
+    this.frameMonitor.setSettings(settings);
+    this.currentDrsScale = 1;
+    this.renderer.setPixelRatio(computePixelRatio(settings, window.devicePixelRatio, 1));
+    this.onResize();
+
+    const shadows = settings.shadows && !this.isSoftwareGl;
+    this.renderer.shadowMap.enabled = shadows;
+    this.renderer.shadowMap.type = settings.softShadows ? THREE.PCFSoftShadowMap : THREE.PCFShadowMap;
+    this.dirLight.castShadow = shadows;
+    if (mapChanged) {
+      this.dirLight.shadow.mapSize.set(settings.shadowMapSize, settings.shadowMapSize);
+      this.dirLight.shadow.map?.dispose();
+      this.dirLight.shadow.map = null;
+    }
+    if (shadowsChanged) {
+      // Shadow toggles change shader variants, so materials must recompile
+      this.scene.traverse((obj) => {
+        const mat = (obj as THREE.Mesh).material;
+        if (mat) (Array.isArray(mat) ? mat : [mat]).forEach((m) => (m.needsUpdate = true));
+      });
+    }
+    this.onQualityApplied(settings);
+    this.qualityListener?.(settings.tier);
+  }
+
+  private composer: EffectComposer | null = null;
+
+  /** Turns tier-dependent features on or off. */
+  protected onQualityApplied(settings: QualitySettings) {
+    this.setPostProcessing(settings.postProcessing);
+  }
+
+  /**
+   * High tier only: one merged effect pass with SMAA, bloom on bright highlights
+   * (sun, target rings, trails), a light vignette, and ACES tone mapping.
+   */
+  private postProcessingRequested = false;
+
+  private setPostProcessing(enabled: boolean) {
+    this.postProcessingRequested = enabled;
+    if (!enabled) {
+      if (this.composer) {
+        this.composer.dispose();
+        this.composer = null;
+        this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      }
+      return;
+    }
+    if (this.composer) return;
+    // Loaded on demand so low and medium tiers don't download or parse it
+    import('postprocessing')
+      .then((pp) => {
+        if (!this.postProcessingRequested || this.composer || this.isDestroyed) return;
+        const composer = new pp.EffectComposer(this.renderer, { frameBufferType: THREE.HalfFloatType });
+        composer.addPass(new pp.RenderPass(this.scene, this.camera));
+        composer.addPass(
+          new pp.EffectPass(
+            this.camera,
+            new pp.SMAAEffect(),
+            new pp.BloomEffect({ luminanceThreshold: 3.0, luminanceSmoothing: 0.4, intensity: 0.45, mipmapBlur: true }),
+            new pp.VignetteEffect({ offset: 0.32, darkness: 0.38 }),
+            new pp.ToneMappingEffect({ mode: pp.ToneMappingMode.ACES_FILMIC })
+          )
+        );
+        // Tone mapping now happens in the effect pass instead of the renderer
+        this.renderer.toneMapping = THREE.NoToneMapping;
+        const size = this.renderer.getSize(new THREE.Vector2());
+        composer.setSize(size.x, size.y);
+        this.composer = composer;
+      })
+      .catch(() => {
+        this.composer = null;
+        this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      });
+  }
+
+
+  private updateQualityMonitor(rawDt: number) {
+    const decision = this.frameMonitor.sample(rawDt * 1000);
+    if (!decision) return;
+    if (decision.downgradeTo) {
+      this.applyQuality(QUALITY_PRESETS[decision.downgradeTo]);
+    } else if (decision.scale !== undefined) {
+      this.setDynamicResolutionScale(decision.scale);
+    }
   }
 
   /**
@@ -2559,13 +3103,14 @@ export class FootGolfRenderer {
    * Switch course / hole
    */
   public loadHole(course: CourseData, hole: HoleData) {
+    const courseChanged = this.activeCourse?.id !== course.id;
     this.activeCourse = course;
     this.activeHole = hole;
-    this.scene.background = new THREE.Color(course.skyColor);
-    (this.scene.fog as THREE.FogExp2).color.set(course.fogColor);
+    if (courseChanged) this.pendingAtmosphere = course;
 
     this.buildTerrain(course, hole);
     this.buildProps(hole);
+    this.buildGrassTufts(hole);
     this.buildClouds();
 
     this.cupGroup.position.set(hole.pinPosition.x, hole.pinPosition.y, hole.pinPosition.z);
@@ -2580,15 +3125,101 @@ export class FootGolfRenderer {
     this.updateCameraInstant(hole);
   }
 
+  private frameHook: ((rawDt: number) => void) | null = null;
+  private isPaused = false;
+
+  /**
+   * Registers a callback that runs at the start of every frame, before the scene updates.
+   * The game uses it to step physics so there is a single animation loop.
+   */
+  public setFrameHook(hook: ((rawDt: number) => void) | null) {
+    this.frameHook = hook;
+  }
+
+  /** Pauses or resumes the frame loop (used when the app goes to the background). */
+  public setPaused(paused: boolean) {
+    if (this.isPaused === paused || this.isDestroyed) return;
+    this.isPaused = paused;
+    if (paused) {
+      cancelAnimationFrame(this.frameId);
+    } else {
+      this.startLoop();
+    }
+  }
+
+  private hitStopUntil = 0;
+
+  /** Freezes character animation briefly (paired with the physics hit-stop on perfect strikes). */
+  public triggerHitStop(ms: number) {
+    this.hitStopUntil = performance.now() + ms;
+    this.triggerCameraImpact(0.22);
+  }
+
+  private windGhostGroup: THREE.Group | null = null;
+  private windGhostLine: THREE.Line | null = null;
+
+  /**
+   * Shows where the shot would land without wind (a faint ring) and a line to the
+   * wind-adjusted landing spot, so players can learn how far to aim off.
+   */
+  public setWindGhost(noWindLanding: Vector3D | null, windLanding: Vector3D | null) {
+    if (!this.windGhostGroup) {
+      const group = new THREE.Group();
+      const ringGeom = new THREE.RingGeometry(0.85, 1.05, 40);
+      ringGeom.rotateX(-Math.PI / 2);
+      const ring = new THREE.Mesh(
+        ringGeom,
+        new THREE.MeshBasicMaterial({ color: 0x7dd3fc, transparent: true, opacity: 0.55, depthWrite: false })
+      );
+      ring.renderOrder = 5;
+      group.add(ring);
+      const lineGeom = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
+      const line = new THREE.Line(
+        lineGeom,
+        new THREE.LineBasicMaterial({ color: 0x7dd3fc, transparent: true, opacity: 0.7, depthWrite: false })
+      );
+      line.renderOrder = 5;
+      this.windGhostLine = line;
+      this.scene.add(group, line);
+      this.windGhostGroup = group;
+    }
+    const show = !!noWindLanding && !!windLanding && Math.hypot(noWindLanding.x - windLanding.x, noWindLanding.z - windLanding.z) > 0.6;
+    this.windGhostGroup.visible = show;
+    this.windGhostLine!.visible = show;
+    if (!show || !noWindLanding || !windLanding || !this.activeHole) return;
+    const y0 = getTerrainHeight(this.activeHole, noWindLanding.x, noWindLanding.z) + 0.05;
+    const y1 = getTerrainHeight(this.activeHole, windLanding.x, windLanding.z) + 0.05;
+    this.windGhostGroup.position.set(noWindLanding.x, y0, noWindLanding.z);
+    const pos = this.windGhostLine!.geometry.attributes.position as THREE.BufferAttribute;
+    pos.setXYZ(0, noWindLanding.x, y0, noWindLanding.z);
+    pos.setXYZ(1, windLanding.x, y1, windLanding.z);
+    pos.needsUpdate = true;
+    this.windGhostLine!.geometry.computeBoundingSphere();
+  }
+
+  /** Moves only the visible ball (no trail or spin updates); used for render interpolation. */
+  public setBallRenderPosition(pos: Vector3D) {
+    this.ballGroup.position.set(pos.x, pos.y, pos.z);
+  }
+
   private startLoop() {
     let lastTime = performance.now();
 
     const tick = (currentTime: number) => {
-      if (this.isDestroyed) return;
+      if (this.isDestroyed || this.isPaused) return;
 
-      const rawDt = (currentTime - lastTime) / 1000;
+      const rawDt = Math.max(0, (currentTime - lastTime) / 1000);
       const dt = Math.min(rawDt, 0.05); // clamped dt
       lastTime = currentTime;
+
+      if (this.pendingAtmosphere) {
+        const pending = this.pendingAtmosphere;
+        this.pendingAtmosphere = null;
+        this.applyAtmosphere(pending);
+      }
+      this.frameHook?.(rawDt);
+      this.updateQualityMonitor(rawDt);
+      this.updateShadowFrustum();
 
       // Dynamic animations
       this.updateFlag(currentTime * 0.001);
@@ -2617,6 +3248,12 @@ export class FootGolfRenderer {
         }
       }
 
+      // Scroll water ripples
+      if (this.waterNormalTexture) {
+        this.waterNormalTexture.offset.x = (this.waterNormalTexture.offset.x + dt * 0.012) % 1;
+        this.waterNormalTexture.offset.y = (this.waterNormalTexture.offset.y + dt * 0.007) % 1;
+      }
+
       // Gentle water hazard shimmer & wave oscillation
       for (let w = 0; w < this.waterGroup.children.length; w++) {
         const waterMesh = this.waterGroup.children[w] as THREE.Mesh;
@@ -2643,6 +3280,11 @@ export class FootGolfRenderer {
 
       // Wind wisps drifting across 3D environment
       this.updateWindWisps(dt, currentTime * 0.001);
+      this.grassUniforms.uTime.value = currentTime * 0.001;
+      if (this.activeWind) {
+        const ws = Math.min(1.5, this.activeWind.speed / 5);
+        this.grassUniforms.uWind.value.set(Math.sin(this.activeWind.angleRad) * ws, Math.cos(this.activeWind.angleRad) * ws);
+      }
 
       // Animate downhill slope break beads across green contour grid
       if (this.greenGridGroup.visible && this.greenSlopeBeads.length > 0) {
@@ -2663,11 +3305,20 @@ export class FootGolfRenderer {
       // 3D Player Character & Camera motion
       if (this.activeHole) {
         const terrainH = getTerrainHeight(this.activeHole, this.ballGroup.position.x, this.ballGroup.position.z);
-        this.playerCharacter.update(dt, this.aimAngleRad, this.ballGroup.position, terrainH);
+        const charDt = currentTime < this.hitStopUntil ? 0 : dt;
+        this.playerCharacter.update(charDt, this.aimAngleRad, this.ballGroup.position, terrainH);
         this.updateCamera(dt, this.activeHole);
       }
 
-      this.renderer.render(this.scene, this.camera);
+      if (this.composer) {
+        // Count the whole frame across composer passes for the stats overlay
+        this.renderer.info.autoReset = false;
+        this.renderer.info.reset();
+        this.composer.render(dt);
+      } else {
+        this.renderer.info.autoReset = true;
+        this.renderer.render(this.scene, this.camera);
+      }
 
       if (this.isSoftwareGl) {
         this.afterDraw(() => {
@@ -2809,6 +3460,10 @@ export class FootGolfRenderer {
 
     if (this.flagTexture) this.flagTexture.dispose();
     if (this.grassTexture) this.grassTexture.dispose();
+    this.surfaceTexture?.dispose();
+    this.envTarget?.dispose();
+    this.waterNormalTexture?.dispose();
+    this.composer?.dispose();
     if (this.grassBumpTexture) this.grassBumpTexture.dispose();
     if (this.ballTexture) this.ballTexture.dispose();
 

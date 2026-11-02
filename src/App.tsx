@@ -21,10 +21,18 @@ import { soundEngine } from './game/audio';
 import {
   advanceTournamentHole,
   createTournament,
+  simulateBotStrokes,
   INITIAL_BALLS,
   INITIAL_PLAYER_PROFILE,
 } from './game/tournament';
 import { triggerHaptic } from './game/haptics';
+import { scoreHoleOut, strokesTakenFromCounter } from './game/core/holeScoring';
+import { chooseKickType } from './game/core/botPlayer';
+import type { BotWorkerRequest, BotWorkerResult } from './workers/botWorker';
+import { GameSettings, parseSettings, setActiveSettings } from './game/settings';
+import { loadValue, saveValue } from './platform/storage';
+import { subscribeLifecycle } from './platform/lifecycle';
+import type { QualityTier } from './game/quality';
 import {
   BallPhysicsState,
   CourseData,
@@ -87,7 +95,7 @@ export default function App() {
   // Tournament and Player Profile
   const [profile, setProfile] = useState<PlayerProfile>(() => {
     try {
-      const saved = localStorage.getItem('footgolf_profile');
+      const saved = loadValue('footgolf_profile');
       if (saved) {
         const parsed = JSON.parse(saved);
         return {
@@ -182,7 +190,7 @@ export default function App() {
   // Daily Missions System
   const [dailyMissionsState, setDailyMissionsState] = useState<DailyMissionsState>(() => {
     try {
-      const saved = localStorage.getItem('footgolf_daily_missions');
+      const saved = loadValue('footgolf_daily_missions');
       return getOrRefreshDailyMissions(saved ? JSON.parse(saved) : undefined);
     } catch {
       return getOrRefreshDailyMissions();
@@ -212,9 +220,115 @@ export default function App() {
   const shotElapsedTimeRef = useRef<number>(0);
 
 
+  // Player settings (quality, reduced motion, vibration)
+  const [settings, setSettings] = useState<GameSettings>(() => {
+    try {
+      return parseSettings(loadValue('footgolf_settings'));
+    } catch {
+      return parseSettings(null);
+    }
+  });
+  const [activeQualityTier, setActiveQualityTier] = useState<QualityTier>('medium');
+  setActiveSettings(settings);
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
+
+  useEffect(() => {
+    saveValue('footgolf_settings', JSON.stringify(settings));
+  }, [settings]);
+
+  useEffect(() => {
+    rendererRef.current?.setQualityPreference(settings.quality);
+  }, [settings.quality]);
+
+  // App lifecycle: pause rendering and audio in the background, and map the Android back button.
+  const lifecycleStateRef = useRef({
+    screen,
+    modals: [] as { open: boolean; close: () => void }[],
+  });
+  lifecycleStateRef.current = {
+    screen,
+    modals: [
+      { open: activeReplayTrack !== null, close: () => setActiveReplayTrack(null) },
+      { open: showSpinModal, close: () => setShowSpinModal(false) },
+      { open: showCourseSelect, close: () => setShowCourseSelect(false) },
+      { open: showTournamentHub, close: () => setShowTournamentHub(false) },
+      { open: showTournamentLeaderboard, close: () => setShowTournamentLeaderboard(false) },
+      { open: showLockerRoom, close: () => setShowLockerRoom(false) },
+      { open: showDailyMissions, close: () => setShowDailyMissions(false) },
+    ],
+  };
+  useEffect(() => {
+    return subscribeLifecycle({
+      onBackground: () => {
+        rendererRef.current?.setPaused(true);
+        soundEngine.suspendForBackground();
+        if (lifecycleStateRef.current.screen === 'playing') setScreen('paused');
+      },
+      onForeground: () => {
+        rendererRef.current?.setPaused(false);
+        soundEngine.resumeFromBackground();
+      },
+      onBack: () => {
+        const { screen: current, modals } = lifecycleStateRef.current;
+        const openModal = modals.find((m) => m.open);
+        if (openModal) {
+          openModal.close();
+          return true;
+        }
+        if (current === 'playing') {
+          setScreen('paused');
+          return true;
+        }
+        if (current === 'paused') {
+          setScreen('playing');
+          return true;
+        }
+        // On the title screen, let Android close the app
+        return current !== 'title';
+      },
+    });
+  }, []);
+
+  // Precompute bot scores for the current tournament hole in a Web Worker so physics
+  // simulation never blocks rendering. Falls back to the main thread, one bot at a time.
+  const botScoresRef = useRef<{ key: string; scores: Record<string, number> }>({ key: '', scores: {} });
+  const botWorkerRef = useRef<Worker | null>(null);
+  useEffect(() => {
+    try {
+      const worker = new Worker(new URL('./workers/botWorker.ts', import.meta.url), { type: 'module' });
+      worker.onmessage = (e: MessageEvent<BotWorkerResult>) => {
+        if (botScoresRef.current.key === e.data.key) botScoresRef.current.scores[e.data.competitorId] = e.data.strokes;
+      };
+      botWorkerRef.current = worker;
+      return () => worker.terminate();
+    } catch {
+      botWorkerRef.current = null;
+    }
+  }, []);
+  useEffect(() => {
+    const key = `${tournament.id}:${tournament.currentHoleIndex}`;
+    botScoresRef.current = { key, scores: {} };
+    if (botWorkerRef.current) {
+      botWorkerRef.current.postMessage({ key, tournament, hole: currentHole, wind } satisfies BotWorkerRequest);
+      return;
+    }
+    const bots = tournament.leaderboard.filter((c) => !c.isPlayer);
+    let index = 0;
+    let timer: ReturnType<typeof setTimeout>;
+    const step = () => {
+      if (botScoresRef.current.key !== key || index >= bots.length) return;
+      const bot = bots[index++];
+      botScoresRef.current.scores[bot.id] = simulateBotStrokes(tournament, bot.id, bot.skillRating, currentHole, wind);
+      timer = setTimeout(step, 30);
+    };
+    timer = setTimeout(step, 500);
+    return () => clearTimeout(timer);
+  }, [tournament.id, tournament.currentHoleIndex, currentHole, wind]);
+
   // Save daily missions state
   useEffect(() => {
-    localStorage.setItem('footgolf_daily_missions', JSON.stringify(dailyMissionsState));
+    saveValue('footgolf_daily_missions', JSON.stringify(dailyMissionsState));
   }, [dailyMissionsState]);
 
   // Live Physics Ball State (Mutable ref for 60Hz loop decoupled from React state)
@@ -245,7 +359,7 @@ export default function App() {
 
   // Save profile changes
   useEffect(() => {
-    localStorage.setItem('footgolf_profile', JSON.stringify(profile));
+    saveValue('footgolf_profile', JSON.stringify(profile));
   }, [profile]);
 
   // Autostart query parameter support (?autostart=1)
@@ -277,6 +391,23 @@ export default function App() {
           wind
         );
         rendererRef.current.updateTrajectoryLine(trajectory, true);
+
+        // Wind guide: compare against the same shot with no wind
+        if (kType !== 'putt' && wind.speed > 0.5 && trajectory.length > 1) {
+          const calm = predictTrajectory(
+            ballStateRef.current.position,
+            kType,
+            p,
+            angle,
+            sp,
+            ballStateRef.current.lie,
+            currentHole,
+            { speed: 0, angleRad: 0 }
+          );
+          rendererRef.current.setWindGhost(calm[calm.length - 1] ?? null, trajectory[trajectory.length - 1]);
+        } else {
+          rendererRef.current.setWindGhost(null, null);
+        }
 
         // Putting Read Line when on green or putting
         if (kType === 'putt' || ballStateRef.current.lie === 'green') {
@@ -312,6 +443,7 @@ export default function App() {
         rendererRef.current.updateGreenGrid(currentHole, shouldShowGrid);
       } else {
         rendererRef.current.updateTrajectoryLine([], false);
+        rendererRef.current.setWindGhost(null, null);
         rendererRef.current.updatePuttingReadLine([], false);
         rendererRef.current.updateGreenGrid(currentHole, false);
         setPuttingReadLineData(null);
@@ -325,7 +457,9 @@ export default function App() {
   useEffect(() => {
     if (!canvasMountRef.current) return;
 
-    const renderer = new FootGolfRenderer(canvasMountRef.current, currentCourse, currentHole);
+    const renderer = new FootGolfRenderer(canvasMountRef.current, currentCourse, currentHole, settingsRef.current.quality);
+    setActiveQualityTier(renderer.getQualityTier());
+    renderer.onQualityChange(setActiveQualityTier);
     rendererRef.current = renderer;
     renderer.setActiveHole(currentHole);
     renderer.setActiveWind(wind);
@@ -343,6 +477,14 @@ export default function App() {
     }
 
     updateAimVisuals(aimAngleRad, power, kickType, spin);
+
+    // Physics runs inside the renderer's frame loop so there is a single requestAnimationFrame
+    renderer.setFrameHook((rawDt) => physicsTickRef.current(rawDt));
+
+    // Expose the renderer in development builds for automated browser checks
+    if (import.meta.env.DEV) {
+      (window as unknown as { __footgolf?: FootGolfRenderer }).__footgolf = renderer;
+    }
 
     return () => {
       renderer.dispose();
@@ -365,26 +507,49 @@ export default function App() {
   spinRef.current = spin;
   const isFastForwardRef = useRef(isFastForward);
   isFastForwardRef.current = isFastForward;
+  // Gameplay time scaling (slow motion near the cup) and hit-stop on perfect strikes
+  const timeScaleRef = useRef(1);
+  const hitStopUntilRef = useRef(0);
 
-  // 2. Continuous Deterministic Fixed-Timestep Physics Loop (60Hz fixed delta)
-  useEffect(() => {
-    let animId = 0;
-    let lastTime = performance.now();
-    let accumulator = 0;
+  // 2. Deterministic fixed-timestep physics (60 Hz), driven by the renderer's single frame loop.
+  // The tick function is re-created on every render so it always sees the latest state,
+  // while the renderer holds a stable hook that calls whatever tick is current.
+  const physicsAccumulatorRef = useRef(0);
+  const prevBallPosRef = useRef<Vector3D | null>(null);
+  const lastTelemetryTimeRef = useRef(0);
+  const physicsTickRef = useRef<(rawDt: number) => void>(() => {});
+  physicsTickRef.current = (rawDt: number) => {
     const FIXED_DT = 1 / 60; // 60Hz deterministic physics step
+    let accumulator = physicsAccumulatorRef.current;
 
-    const loop = (time: number) => {
-      const rawDt = (time - lastTime) / 1000;
-      lastTime = time;
-
+    {
       const state = ballStateRef.current;
 
-      if (!state.isSleeping && !state.inHole) {
-        const timeScale = isFastForwardRef.current ? 2.4 : 1.0;
+      const inHitStop = performance.now() < hitStopUntilRef.current;
+      if (inHitStop) {
+        // Freeze the simulation briefly on contact so strikes feel weighty
+      } else if (!state.isSleeping && !state.inHole) {
+        // Slow motion when a rolling ball approaches the cup with a chance to drop
+        const toPinX = currentHole.pinPosition.x - state.position.x;
+        const toPinZ = currentHole.pinPosition.z - state.position.z;
+        const pinDist = Math.hypot(toPinX, toPinZ);
+        const speed = Math.hypot(state.velocity.x, state.velocity.z);
+        const headingToCup = speed > 0.05 && (state.velocity.x * toPinX + state.velocity.z * toPinZ) / (speed * Math.max(pinDist, 0.01)) > 0.92;
+        const dramatic =
+          !settingsRef.current.reducedMotion &&
+          !isFastForwardRef.current &&
+          state.isGrounded &&
+          pinDist < 2.8 &&
+          speed < 4.0 &&
+          headingToCup;
+        const targetScale = dramatic ? 0.4 : 1.0;
+        timeScaleRef.current += (targetScale - timeScaleRef.current) * Math.min(1, rawDt * 8);
+        const timeScale = (isFastForwardRef.current ? 2.4 : 1.0) * timeScaleRef.current;
         // Cap accumulator to 0.12s to prevent spiral of death during backgrounding or frame hitches
         accumulator += Math.min(rawDt * timeScale, 0.12);
 
         while (accumulator >= FIXED_DT && !ballStateRef.current.isSleeping && !ballStateRef.current.inHole) {
+          prevBallPosRef.current = { ...ballStateRef.current.position };
           const result = stepBallPhysics(
             ballStateRef.current,
             currentHole,
@@ -420,11 +585,16 @@ export default function App() {
               result.state.position.x - kickStartPosRef.current.x,
               result.state.position.z - kickStartPosRef.current.z
             );
-            setInFlightTelemetry({
-              altitudeMeters: alt,
-              speedKmh: spd,
-              carryMeters: carry,
-            });
+            // Throttle HUD telemetry to ~12 Hz so React doesn't re-render at the physics rate
+            const telemetryNow = performance.now();
+            if (telemetryNow - lastTelemetryTimeRef.current > 80) {
+              lastTelemetryTimeRef.current = telemetryNow;
+              setInFlightTelemetry({
+                altitudeMeters: alt,
+                speedKmh: spd,
+                carryMeters: carry,
+              });
+            }
 
             // Audio, particle, camera impact, and haptic triggers
             if (result.events.hitPin) {
@@ -482,10 +652,10 @@ export default function App() {
               if (result.events.surface === 'sand') {
                 currentHoleHitBunkerRef.current = true;
               }
-              rendererRef.current.emitParticles(
+              rendererRef.current.emitSurfaceImpact(
                 result.state.position,
-                6,
-                result.events.surface === 'sand' ? 0xe0c98b : 0x4caf50
+                result.events.surface,
+                result.events.impactSpeed
               );
             }
 
@@ -525,13 +695,15 @@ export default function App() {
             triggerHaptic('pure');
             rendererRef.current?.playCharacterCelebration();
             setIsFastForward(false);
-            const holeDelta = strokeCount - currentHole.par;
+            const holeStrokes = strokesTakenFromCounter(strokeCountRef.current);
             const finalShotDist = Math.round(
               Math.hypot(
                 result.state.position.x - kickStartPosRef.current.x,
                 result.state.position.z - kickStartPosRef.current.z
               )
             );
+            const holeOut = scoreHoleOut(holeStrokes, currentHole.par, finalShotDist);
+            const holeDelta = holeOut.scoreDelta;
 
             // Finalize shot recording for instant replay
             if (currentShotRecorderRef.current) {
@@ -543,75 +715,38 @@ export default function App() {
               if (track) setLastReplayTrack(track);
             }
 
-            // Special celebration for long-distance putts / chip-ins (> 10m)
-            const isLongSink = finalShotDist >= 12 && holeDelta <= 0;
-
-            if (isLongSink) {
+            if (holeOut.isLongSink) {
               soundEngine.playLongHoleOut();
             } else {
               soundEngine.playFanfare(holeDelta);
             }
+            soundEngine.playCrowdCheer(holeOut.crowd);
 
-            // Crowd roar scaled to score performance
-            if (strokeCount === 1 || holeDelta <= -2) {
-              soundEngine.playCrowdCheer('roar');
-            } else if (holeDelta === -1) {
-              soundEngine.playCrowdCheer('cheer');
-            } else {
-              soundEngine.playCrowdCheer('applause');
-            }
-
-            rendererRef.current.emitConfetti(currentHole.pinPosition, isLongSink ? 125 : 95);
+            rendererRef.current.emitConfetti(currentHole.pinPosition, holeOut.isLongSink ? 125 : 95);
             setIsBallInMotion(false);
             rendererRef.current.setBallInFlight(false);
             setInFlightTelemetry(null);
             rendererRef.current.setCameraMode('green');
             setCameraMode('green');
 
-            const title =
-              strokeCount === 1
-                ? 'HOLE-IN-ONE!'
-                : isLongSink && holeDelta <= -1
-                ? `CLUTCH SNIPE! (${finalShotDist}m)`
-                : holeDelta === -3
-                ? 'ALBATROSS!'
-                : holeDelta === -2
-                ? 'EAGLE!'
-                : holeDelta === -1
-                ? 'BIRDIE!'
-                : holeDelta === 0
-                ? 'PAR!'
-                : holeDelta === 1
-                ? 'BOGEY'
-                : `DOUBLE BOGEY (+${holeDelta})`;
-
-            const longBonus = isLongSink ? 50 : 0;
-            const coins =
-              (holeDelta <= -2 ? 150 : holeDelta === -1 ? 80 : holeDelta === 0 ? 40 : 15) + longBonus;
-
             setHoleOutCelebration({
-              title,
-              scoreLabel:
-                holeDelta === 0
-                  ? 'Even Par'
-                  : holeDelta > 0
-                  ? `+${holeDelta}`
-                  : `${holeDelta}`,
+              title: holeOut.title,
+              scoreLabel: holeOut.scoreLabel,
               scoreDelta: holeDelta,
-              strokes: strokeCount,
+              strokes: holeStrokes,
               par: currentHole.par,
-              coinsEarned: coins,
+              coinsEarned: holeOut.coins,
               distanceMeters: finalShotDist,
             });
 
             // Evaluate Daily Missions for hole completion
             const { missions: updatedHoleMissions, newlyCompleted: holeNewlyCompleted } = checkHoleFinishedMissions(
-              dailyMissionsState.missions,
+              missionsRef.current,
               {
                 par: currentHole.par,
-                strokes: strokeCount,
+                strokes: holeStrokes,
                 finalShotDistanceMeters: finalShotDist,
-                finalShotKickType: kickType,
+                finalShotKickType: kickTypeRef.current,
                 hitBunker: currentHoleHitBunkerRef.current,
                 hitWater: currentHoleHitWaterRef.current,
               }
@@ -624,7 +759,7 @@ export default function App() {
             setDailyMissionsState((prev) => ({ ...prev, missions: updatedHoleMissions }));
 
             // Record stats, XP, and Skill Points
-            const holeXp = holeDelta <= -2 ? 250 : holeDelta === -1 ? 150 : holeDelta === 0 ? 80 : 35;
+            const holeXp = holeOut.xp;
             setProfile((prev) => {
               const stats = { ...prev.stats };
               stats.holesPlayed += 1;
@@ -655,7 +790,7 @@ export default function App() {
 
               return {
                 ...prev,
-                coins: prev.coins + (holeDelta <= -2 ? 150 : holeDelta === -1 ? 80 : holeDelta === 0 ? 40 : 15),
+                coins: prev.coins + holeOut.coins,
                 currentXp,
                 playerLevel,
                 skillPoints,
@@ -665,7 +800,15 @@ export default function App() {
             });
 
             // Advance tournament
-            const updatedTourney = advanceTournamentHole(tournamentRef.current, strokeCountRef.current, currentHole);
+            const updatedTourney = advanceTournamentHole(
+              tournamentRef.current,
+              holeStrokes,
+              currentHole,
+              wind,
+              botScoresRef.current.key === `${tournamentRef.current.id}:${tournamentRef.current.currentHoleIndex}`
+                ? botScoresRef.current.scores
+                : undefined
+            );
             setTournament(updatedTourney);
 
             if (updatedTourney.roundState === 'podium') {
@@ -759,14 +902,7 @@ export default function App() {
             const toPinX = currentHole.pinPosition.x - result.state.position.x;
             const toPinZ = currentHole.pinPosition.z - result.state.position.z;
             const dist = Math.sqrt(toPinX * toPinX + toPinZ * toPinZ);
-            let nextKType: KickType = 'drive';
-            if (result.state.lie === 'green' || dist < 22) {
-              nextKType = 'putt';
-            } else if (result.state.lie === 'sand' || (dist < 65 && dist > 25)) {
-              nextKType = 'chip';
-            } else {
-              nextKType = 'drive';
-            }
+            const nextKType: KickType = chooseKickType(result.state.lie, dist);
             setKickType(nextKType);
 
             // Aim towards cup automatically on rest
@@ -777,14 +913,28 @@ export default function App() {
           }
         }
       }
+      } else if (!inHitStop) {
+        accumulator = 0;
+        prevBallPosRef.current = null;
+        timeScaleRef.current = 1;
+      }
     }
 
-      animId = requestAnimationFrame(loop);
-    };
+    physicsAccumulatorRef.current = accumulator;
 
-    animId = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(animId);
-  }, [currentHole, wind, updateAimVisuals]);
+    // Render interpolation: blend between the last two physics states so ball motion
+    // stays smooth on displays faster than 60 Hz.
+    const live = ballStateRef.current;
+    const prev = prevBallPosRef.current;
+    if (prev && !live.isSleeping && !live.inHole && rendererRef.current) {
+      const alpha = Math.min(1, accumulator / FIXED_DT);
+      rendererRef.current.setBallRenderPosition({
+        x: prev.x + (live.position.x - prev.x) * alpha,
+        y: prev.y + (live.position.y - prev.y) * alpha,
+        z: prev.z + (live.position.z - prev.z) * alpha,
+      });
+    }
+  };
 
   // Practice Swing Callback
   const handlePracticeSwing = useCallback(
@@ -903,10 +1053,10 @@ export default function App() {
         kickStartLieRef.current = ballStateRef.current.lie;
 
         // Divot grass / sand particles at kick spot
-        rendererRef.current?.emitParticles(
+        rendererRef.current?.emitSurfaceImpact(
           ballStateRef.current.position,
-          14,
-          ballStateRef.current.lie === 'sand' ? 0xe0c98b : 0x4caf50
+          ballStateRef.current.lie,
+          kickType === 'putt' ? 2 : 12
         );
 
         ballStateRef.current = {
@@ -943,6 +1093,7 @@ export default function App() {
         rendererRef.current?.setCameraMode('flight');
         setCameraMode('flight');
         rendererRef.current?.updateTrajectoryLine([], false);
+        rendererRef.current?.setWindGhost(null, null);
       };
 
       if (rendererRef.current) {
@@ -984,6 +1135,11 @@ export default function App() {
 
       const fireStrike = () => {
         if (arcade.timing.rating === 'perfect') {
+          // Hit-stop: a brief freeze at contact makes perfect strikes feel weighty
+          if (!settingsRef.current.reducedMotion) {
+            hitStopUntilRef.current = performance.now() + 85;
+            rendererRef.current?.triggerHitStop(85);
+          }
           triggerHaptic('pure');
           soundEngine.playSweetSpotKick(arcade.power, kickType);
           rendererRef.current?.emitPureStrike(ballStateRef.current.position);
@@ -1009,10 +1165,10 @@ export default function App() {
         kickStartPosRef.current = { ...ballStateRef.current.position };
         kickStartLieRef.current = ballStateRef.current.lie;
 
-        rendererRef.current?.emitParticles(
+        rendererRef.current?.emitSurfaceImpact(
           ballStateRef.current.position,
-          14,
-          ballStateRef.current.lie === 'sand' ? 0xe0c98b : 0x4caf50
+          ballStateRef.current.lie,
+          kickType === 'putt' ? 2 : 12
         );
 
         ballStateRef.current = {
@@ -1048,6 +1204,7 @@ export default function App() {
         rendererRef.current?.setCameraMode('flight');
         setCameraMode('flight');
         rendererRef.current?.updateTrajectoryLine([], false);
+        rendererRef.current?.setWindGhost(null, null);
       };
 
       if (rendererRef.current) {
@@ -1136,10 +1293,10 @@ export default function App() {
       kickStartLieRef.current = ballStateRef.current.lie;
 
       // Divot grass / sand particles at kick spot
-      rendererRef.current?.emitParticles(
+      rendererRef.current?.emitSurfaceImpact(
         ballStateRef.current.position,
-        12,
-        ballStateRef.current.lie === 'sand' ? 0xe0c98b : 0x4caf50
+        ballStateRef.current.lie,
+        kickType === 'putt' ? 2 : 12
       );
 
       const kick = calculateKickVelocity(
@@ -1185,6 +1342,7 @@ export default function App() {
       rendererRef.current?.setCameraMode('flight');
       setCameraMode('flight');
       rendererRef.current?.updateTrajectoryLine([], false);
+      rendererRef.current?.setWindGhost(null, null);
       rendererRef.current?.updatePuttingReadLine([], false);
     };
 
@@ -1849,7 +2007,7 @@ export default function App() {
       {screen === 'hole_complete' && (
         <HoleCompleteModal
           hole={currentHole}
-          strokes={strokeCount}
+          strokes={strokesTakenFromCounter(strokeCount)}
           onNextHole={handleNextHole}
           onWatchReplay={lastReplayTrack ? () => {
             setScreen('playing');
@@ -1916,6 +2074,9 @@ export default function App() {
           }}
           isMuted={isMuted}
           onToggleMute={handleToggleMute}
+          settings={settings}
+          activeQualityTier={activeQualityTier}
+          onChangeSettings={setSettings}
         />
       )}
 

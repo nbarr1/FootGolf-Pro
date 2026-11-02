@@ -4,6 +4,8 @@
  */
 
 import React from 'react';
+import type { GameSettings } from '../game/settings';
+import type { QualityPreference, QualityTier } from '../game/quality';
 
 interface PauseModalProps {
   onResume: () => void;
@@ -12,7 +14,17 @@ interface PauseModalProps {
   onExitToTitle: () => void;
   isMuted: boolean;
   onToggleMute: () => void;
+  settings: GameSettings;
+  activeQualityTier: QualityTier;
+  onChangeSettings: (settings: GameSettings) => void;
 }
+
+const QUALITY_OPTIONS: { value: QualityPreference; label: string }[] = [
+  { value: 'auto', label: 'Auto' },
+  { value: 'low', label: 'Low' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'high', label: 'High' },
+];
 
 export const PauseModal: React.FC<PauseModalProps> = ({
   onResume,
@@ -21,10 +33,13 @@ export const PauseModal: React.FC<PauseModalProps> = ({
   onExitToTitle,
   isMuted,
   onToggleMute,
+  settings,
+  activeQualityTier,
+  onChangeSettings,
 }) => {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 pointer-events-auto">
-      <div className="bg-slate-900 border border-emerald-500/30 rounded-2xl p-6 w-full max-w-sm text-center shadow-2xl">
+      <div className="bg-slate-900 border border-emerald-500/30 rounded-2xl p-6 w-full max-w-sm max-h-[90dvh] overflow-y-auto text-center shadow-2xl">
         <h2 className="text-xl font-black uppercase text-white tracking-wider mb-1">
           Game Paused
         </h2>
@@ -61,6 +76,51 @@ export const PauseModal: React.FC<PauseModalProps> = ({
           >
             <span>{isMuted ? '🔇 Sound Muted' : '🔊 Sound Enabled'}</span>
           </button>
+
+          <div className="mt-2 rounded-xl bg-slate-800/60 p-3 text-left">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-[11px] font-bold uppercase tracking-wider text-slate-300">Graphics quality</span>
+              {settings.quality === 'auto' && (
+                <span className="text-[10px] text-slate-400">Using {activeQualityTier}</span>
+              )}
+            </div>
+            <div className="grid grid-cols-4 gap-1.5" role="radiogroup" aria-label="Graphics quality">
+              {QUALITY_OPTIONS.map((opt) => (
+                <button
+                  key={opt.value}
+                  role="radio"
+                  aria-checked={settings.quality === opt.value}
+                  onClick={() => onChangeSettings({ ...settings, quality: opt.value })}
+                  className={`min-h-12 rounded-lg text-xs font-bold ${
+                    settings.quality === opt.value
+                      ? 'bg-emerald-500 text-slate-950'
+                      : 'bg-slate-900 text-slate-300 hover:bg-slate-700'
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+
+            <label className="mt-3 flex min-h-12 items-center justify-between gap-3 text-xs text-slate-200">
+              <span>Reduce motion (no shake, slow motion, or hit-stop)</span>
+              <input
+                type="checkbox"
+                className="h-5 w-5 accent-emerald-500"
+                checked={settings.reducedMotion}
+                onChange={(e) => onChangeSettings({ ...settings, reducedMotion: e.target.checked })}
+              />
+            </label>
+            <label className="flex min-h-12 items-center justify-between gap-3 text-xs text-slate-200">
+              <span>Vibration</span>
+              <input
+                type="checkbox"
+                className="h-5 w-5 accent-emerald-500"
+                checked={settings.haptics}
+                onChange={(e) => onChangeSettings({ ...settings, haptics: e.target.checked })}
+              />
+            </label>
+          </div>
 
           <button
             onClick={onExitToTitle}

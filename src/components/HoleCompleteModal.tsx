@@ -35,6 +35,7 @@ export const HoleCompleteModal: React.FC<HoleCompleteModalProps> = ({
     if (delta <= 0) {
       // Fire celebration confetti on Par or better!
       confetti({
+        disableForReducedMotion: true,
         particleCount: delta <= -2 ? 100 : 50,
         spread: 70,
         origin: { y: 0.6 },

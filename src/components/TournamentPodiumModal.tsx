@@ -24,6 +24,7 @@ export const TournamentPodiumModal: React.FC<TournamentPodiumModalProps> = ({
   useEffect(() => {
     if (isPodium) {
       confetti({
+        disableForReducedMotion: true,
         particleCount: 150,
         spread: 90,
         origin: { y: 0.5 },
